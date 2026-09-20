@@ -102,3 +102,47 @@ private final class Mutex<Value>: @unchecked Sendable {
         return body(&value)
     }
 }
+
+/// A conformer that implements ONLY `run` — the shape every existing test
+/// double in the fleet has (`ParityStubExecutor`, `StubShellExecutor`,
+/// `StubResolvedBinaryExecutor`, …).
+///
+/// Before the default implementation this did not COMPILE: adding
+/// `runStreaming` to the protocol was a source-breaking change delivered
+/// inside a `from: "0.1.0"` range those consumers already accept.
+private struct LegacyConformer: ShellExecutorProtocol {
+    func run(
+        _ args: [String], cwd: String?, env: [String: String]?,
+        timeout: TimeInterval, stdin: Data?
+    ) async throws -> ShellCommandResult {
+        ShellCommandResult(
+            exitCode: 0, stdout: Data("legacy".utf8), stderr: Data(), duration: 0)
+    }
+}
+
+@Suite("ShellExecutorProtocol — existing conformers keep compiling")
+struct LegacyConformerTests {
+
+    /// The regression anchor for the source break. If `runStreaming` ever
+    /// becomes a bare requirement again, this file stops compiling — which is
+    /// exactly the failure the fleet would hit.
+    @Test("a conformer implementing only run() still satisfies the protocol")
+    func legacyConformerStillConforms() async throws {
+        let exec: any ShellExecutorProtocol = LegacyConformer()
+        let result = try await exec.run(["true"], cwd: nil, env: nil, timeout: 1, stdin: nil)
+        #expect(result.stdoutString == "legacy")
+    }
+
+    /// The default ignores the sinks and delegates — correct for a test
+    /// double, which has no live output to emit.
+    @Test("the default runStreaming delegates to run and never calls the sinks")
+    func defaultStreamingDelegates() async throws {
+        let exec: any ShellExecutorProtocol = LegacyConformer()
+        let sinkCalled = Mutex(false)
+        let result = try await exec.runStreaming(
+            ["true"], cwd: nil, env: nil, timeout: 1, stdin: nil,
+            onStdout: { _ in sinkCalled.withLock { $0 = true } }, onStderr: nil)
+        #expect(result.stdoutString == "legacy")
+        #expect(!sinkCalled.withLock { $0 }, "a non-streaming conformer must not pretend to stream")
+    }
+}

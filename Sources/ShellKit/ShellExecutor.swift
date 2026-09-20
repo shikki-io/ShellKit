@@ -86,3 +86,33 @@ public protocol ShellExecutorProtocol: Sendable {
         onStderr: (@Sendable (Data) -> Void)?
     ) async throws -> ShellCommandResult
 }
+
+// MARK: - Default conformance
+
+extension ShellExecutorProtocol {
+
+    /// Default: ignore the sinks and delegate to ``run(_:cwd:env:timeout:stdin:)``.
+    ///
+    /// WHY A DEFAULT AND NOT A BARE REQUIREMENT. Adding `runStreaming` to the
+    /// protocol is a SOURCE-BREAKING change for every existing conformer, and
+    /// the fleet has several — `ParityStubExecutor`, `StubShellExecutor`,
+    /// `StubResolvedBinaryExecutor` and others, all test doubles in shikki.
+    /// Every one of them would have stopped compiling on a `from: "0.1.0"`
+    /// dependency, i.e. a version range they already accept: a breaking change
+    /// delivered silently inside a permitted range.
+    ///
+    /// With this default a conformer keeps compiling and simply does not
+    /// stream — correct for a test double, which has no live output to emit.
+    /// `TimedShellExecutor` overrides it with the real implementation.
+    public func runStreaming(
+        _ args: [String],
+        cwd: String? = nil,
+        env: [String: String]? = nil,
+        timeout: TimeInterval = 10,
+        stdin: Data? = nil,
+        onStdout: (@Sendable (Data) -> Void)? = nil,
+        onStderr: (@Sendable (Data) -> Void)? = nil
+    ) async throws -> ShellCommandResult {
+        try await run(args, cwd: cwd, env: env, timeout: timeout, stdin: stdin)
+    }
+}
