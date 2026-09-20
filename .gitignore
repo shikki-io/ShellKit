@@ -21,3 +21,7 @@
 !.env.dist
 !*.env.example
 !*.env.template
+
+# macOS Finder metadata — never tracked (PR #3 review).
+.DS_Store
+**/.DS_Store

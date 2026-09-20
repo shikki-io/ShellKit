@@ -53,6 +53,15 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         self.semaphore = AsyncSemaphore(limit: maxConcurrent)
     }
 
+    /// Execute a command and return its full output at exit.
+    ///
+    /// This IS ``runStreaming(_:cwd:env:timeout:stdin:onStdout:onStderr:)``
+    /// with no sinks — one implementation, not two. Review on PR #3: *"Did
+    /// it's implementation cannot call itself the streaming implementation?
+    /// Do be DRY?"* Correct: the first draft duplicated the permit
+    /// acquisition, the detached signal and the cancellation handler in both
+    /// methods, which is two copies of the concurrency contract that would
+    /// have had to be kept in step by hand.
     public func run(
         _ args: [String],
         cwd: String? = nil,
@@ -60,29 +69,10 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         timeout: TimeInterval = 10,
         stdin: Data? = nil
     ) async throws -> ShellCommandResult {
-        // Acquire permit — suspends here if concurrency cap is reached (H7 fix).
-        await semaphore.wait()
-        // W1.1 fix: Task.detached avoids actor-mailbox starvation.
-        // Under load the actor mailbox queues deeply; a Task { await self.semaphore.signal() }
-        // inherits actor isolation and joins the mailbox queue — it may never execute
-        // while all cooperative threads are IDLE waiting on blocked semaphore.wait() calls.
-        // Task.detached runs on the cooperative pool without actor isolation, so signal()
-        // fires immediately after the subprocess exits, regardless of mailbox depth.
-        let semaphore = self.semaphore  // capture by value — no self. in closure
-        defer { Task.detached { await semaphore.signal() } }
-
-        return try await withTaskCancellationHandler {
-            try await Self.spawnAndWait(
-                args: args,
-                cwd: cwd,
-                env: env,
-                timeout: timeout,
-                stdin: stdin
-            )
-        } onCancel: {
-            // If the outer Task is cancelled, nothing extra to do here —
-            // the timeout Task inside spawnAndWait will SIGKILL the process.
-        }
+        try await runStreaming(
+            args, cwd: cwd, env: env, timeout: timeout, stdin: stdin,
+            onStdout: nil, onStderr: nil
+        )
     }
 
     /// Execute a command, delivering stdout/stderr chunks AS THEY ARRIVE.
@@ -117,8 +107,15 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         onStdout: (@Sendable (Data) -> Void)? = nil,
         onStderr: (@Sendable (Data) -> Void)? = nil
     ) async throws -> ShellCommandResult {
+        // Acquire permit — suspends here if concurrency cap is reached (H7 fix).
         await semaphore.wait()
-        let semaphore = self.semaphore
+        // W1.1 fix: Task.detached avoids actor-mailbox starvation.
+        // Under load the actor mailbox queues deeply; a Task { await self.semaphore.signal() }
+        // inherits actor isolation and joins the mailbox queue — it may never execute
+        // while all cooperative threads are IDLE waiting on blocked semaphore.wait() calls.
+        // Task.detached runs on the cooperative pool without actor isolation, so signal()
+        // fires immediately after the subprocess exits, regardless of mailbox depth.
+        let semaphore = self.semaphore  // capture by value — no self. in closure
         defer { Task.detached { await semaphore.signal() } }
 
         return try await withTaskCancellationHandler {
@@ -131,7 +128,10 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
                 onStdout: onStdout,
                 onStderr: onStderr
             )
-        } onCancel: {}
+        } onCancel: {
+            // If the outer Task is cancelled, nothing extra to do here —
+            // the timeout Task inside spawnAndWait will SIGKILL the process.
+        }
     }
 
     // MARK: - Core spawn implementation (nonisolated static)
