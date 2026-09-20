@@ -93,6 +93,28 @@ extension ShellExecutorProtocol {
 
     /// Default: ignore the sinks and delegate to ``run(_:cwd:env:timeout:stdin:)``.
     ///
+    /// **This delegates the OPPOSITE way to `TimedShellExecutor`, on purpose.**
+    /// Review on PR #5: *"it's not supposed to be the run who call the stream
+    /// one?"* — in the real executor, yes:
+    ///
+    ///     TimedShellExecutor.run  ->  runStreaming(… sinks: nil)
+    ///     ShellExecutorProtocol.runStreaming  ->  run(…)      ← here
+    ///
+    /// The directions differ because the PRIMITIVE differs. In
+    /// `TimedShellExecutor`, streaming is the general case and `run` is the
+    /// specialisation with no sinks, so `run` delegates down to it.
+    ///
+    /// In this extension there is no streaming implementation to delegate to —
+    /// the conformer supplied only `run`. Delegating to `runStreaming` here
+    /// would call THIS default again and **recurse until the stack dies**.
+    /// `run` stays the single bare requirement precisely so that fallback
+    /// always terminates.
+    ///
+    /// The same reason rules out giving `run` a default that calls
+    /// `runStreaming`: a conformer implementing NEITHER would compile and then
+    /// recurse at runtime, and the compiler could not catch it. One required
+    /// primitive, one direction of fallback.
+    ///
     /// WHY A DEFAULT AND NOT A BARE REQUIREMENT. Adding `runStreaming` to the
     /// protocol is a SOURCE-BREAKING change for every existing conformer, and
     /// the fleet has several — `ParityStubExecutor`, `StubShellExecutor`,

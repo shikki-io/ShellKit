@@ -146,3 +146,21 @@ struct LegacyConformerTests {
         #expect(!sinkCalled.withLock { $0 }, "a non-streaming conformer must not pretend to stream")
     }
 }
+
+/// The asymmetry is load-bearing: `TimedShellExecutor.run` delegates DOWN to
+/// `runStreaming`, while the protocol default delegates UP to `run`. If the
+/// default were ever "fixed" to match the executor's direction it would call
+/// itself, and this test would hang rather than fail — so it is pinned with a
+/// real call through the default on a conformer that has no streaming of its
+/// own.
+extension LegacyConformerTests {
+
+    @Test("the default fallback terminates instead of recursing")
+    func defaultDoesNotRecurse() async throws {
+        let exec: any ShellExecutorProtocol = LegacyConformer()
+        let result = try await exec.runStreaming(
+            ["true"], cwd: nil, env: nil, timeout: 1, stdin: nil,
+            onStdout: nil, onStderr: nil)
+        #expect(result.stdoutString == "legacy", "the default must reach run(), not itself")
+    }
+}
