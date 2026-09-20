@@ -66,4 +66,23 @@ public protocol ShellExecutorProtocol: Sendable {
         timeout: TimeInterval,
         stdin: Data?
     ) async throws -> ShellCommandResult
+
+    /// Execute a command, delivering stdout/stderr chunks AS THEY ARRIVE.
+    ///
+    /// Same guarantees as ``run(_:cwd:env:timeout:stdin:)`` — timeout,
+    /// SIGTERM/SIGKILL escalation, concurrency cap — plus live output, so a
+    /// caller that needs to re-emit a long-running process does not have to
+    /// drop to a raw `Process` and lose all of them.
+    ///
+    /// Sinks are called on a dispatch source thread and MUST be cheap: a slow
+    /// sink stalls the drain and re-introduces the pipe-deadlock class.
+    func runStreaming(
+        _ args: [String],
+        cwd: String?,
+        env: [String: String]?,
+        timeout: TimeInterval,
+        stdin: Data?,
+        onStdout: (@Sendable (Data) -> Void)?,
+        onStderr: (@Sendable (Data) -> Void)?
+    ) async throws -> ShellCommandResult
 }
