@@ -85,6 +85,55 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         }
     }
 
+    /// Execute a command, delivering stdout/stderr chunks AS THEY ARRIVE.
+    ///
+    /// WHY THIS EXISTS. `run` accumulates and returns everything at exit, so
+    /// any caller needing live output had to bypass this executor with a raw
+    /// `Process` — losing the timeout, the SIGTERM/SIGKILL escalation, the
+    /// concurrency cap and the H6 pipe-deadlock fixes that live here. kagami's
+    /// `GoScopeRunner` says so in a comment and names this API as the fix:
+    ///
+    ///   "It CANNOT migrate to ShellKit.TimedShellExecutor yet — that API
+    ///    buffers stdout until exit (no streaming callback), which would
+    ///    silence a 30s go-test run and kill the live -json re-emit. The
+    ///    missing primitive goes UPSTREAM first: ShellKit runStreaming(...)"
+    ///
+    /// The drain ALREADY received chunks incrementally; it simply had no way
+    /// to hand them on. So this is the same code path as `run`, with a sink —
+    /// not a second execution mechanism. The full output is still returned, so
+    /// a caller can stream AND keep the buffer.
+    ///
+    /// - Parameters:
+    ///   - onStdout: called on a dispatch source thread per chunk. Must be
+    ///     cheap and non-blocking: a slow sink stalls the drain, which is what
+    ///     re-introduces the pipe-deadlock class (H6). Buffer and hand off.
+    ///   - onStderr: same contract for stderr.
+    public func runStreaming(
+        _ args: [String],
+        cwd: String? = nil,
+        env: [String: String]? = nil,
+        timeout: TimeInterval = 10,
+        stdin: Data? = nil,
+        onStdout: (@Sendable (Data) -> Void)? = nil,
+        onStderr: (@Sendable (Data) -> Void)? = nil
+    ) async throws -> ShellCommandResult {
+        await semaphore.wait()
+        let semaphore = self.semaphore
+        defer { Task.detached { await semaphore.signal() } }
+
+        return try await withTaskCancellationHandler {
+            try await Self.spawnAndWait(
+                args: args,
+                cwd: cwd,
+                env: env,
+                timeout: timeout,
+                stdin: stdin,
+                onStdout: onStdout,
+                onStderr: onStderr
+            )
+        } onCancel: {}
+    }
+
     // MARK: - Core spawn implementation (nonisolated static)
 
     private static func spawnAndWait(
@@ -92,7 +141,9 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         cwd: String?,
         env: [String: String]?,
         timeout: TimeInterval,
-        stdin: Data?
+        stdin: Data?,
+        onStdout: (@Sendable (Data) -> Void)? = nil,
+        onStderr: (@Sendable (Data) -> Void)? = nil
     ) async throws -> ShellCommandResult {
         let start = Date()
 
@@ -183,8 +234,8 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         // inherited write-end (credential-helper pattern) postpones pipe EOF
         // indefinitely — a blocked read() cannot be cancelled on Darwin, but a
         // handler-based drain can be force-finished after the post-exit grace.
-        let stdoutDrain = PipeDrain(handle: stdoutPipe.fileHandleForReading)
-        let stderrDrain = PipeDrain(handle: stderrPipe.fileHandleForReading)
+        let stdoutDrain = PipeDrain(handle: stdoutPipe.fileHandleForReading, onChunk: onStdout)
+        let stderrDrain = PipeDrain(handle: stderrPipe.fileHandleForReading, onChunk: onStderr)
 
         // Wire handler and run — the continuation resumes when the process exits.
         // proc.run() is called INSIDE the continuation so the handler is wired
@@ -267,9 +318,18 @@ private final class PipeDrain: @unchecked Sendable {
     private var buffer = Data()
     private var finished = false
     private var continuation: CheckedContinuation<Data, Never>?
+    /// Live sink, called on the dispatch source as each chunk lands.
+    ///
+    /// The drain ALREADY received chunks incrementally — it simply had no way
+    /// to hand them on, so every caller that needed live output (a 30s
+    /// `go test` re-emitting `-json`, a long build) had to bypass this
+    /// executor with a raw `Process`. That bypass is the whole reason
+    /// `runStreaming` exists.
+    private let onChunk: (@Sendable (Data) -> Void)?
 
-    init(handle: FileHandle) {
+    init(handle: FileHandle, onChunk: (@Sendable (Data) -> Void)? = nil) {
         self.handle = handle
+        self.onChunk = onChunk
         handle.readabilityHandler = { [weak self] h in
             guard let self else { return }
             let chunk = h.availableData
@@ -279,6 +339,9 @@ private final class PipeDrain: @unchecked Sendable {
                 self.lock.lock()
                 self.buffer.append(chunk)
                 self.lock.unlock()
+                // Outside the lock: a slow consumer must not stall the drain,
+                // which is what re-introduces the pipe-deadlock class (H6).
+                self.onChunk?(chunk)
             }
         }
     }
