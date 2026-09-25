@@ -1,0 +1,13 @@
+# kagami scopes for ShellKit — the one way to run this package's tests
+# (never `swift test` from an agent). Registered 2026-09-25 with the
+# direct-exec fix so the kit has a gate of its own.
+[[scopes]]
+name = "ShellKit"
+language = "swift"
+package_path = "."
+test_target_name = "ShellKitTests"
+type_patterns = ["TimedShellExecutorTests"]
+test_file_patterns = ["**/ShellKitTests/TimedShellExecutorTests.swift"]
+expected_test_min = 12
+timeout_seconds = 600
+description = "ShellKit — TimedShellExecutor: pipe/deadlock, timeout, concurrency cap, exit codes, and the launch plan (absolute executable execs directly so DYLD_* survive)."
