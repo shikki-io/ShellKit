@@ -1,9 +1,10 @@
 import Foundation
 #if canImport(Darwin)
-import Darwin
+    import Darwin
 #endif
 
 // MARK: - TimedShellExecutor
+
 //
 // Canonical async shell executor for the shikki CLI.
 //
@@ -30,7 +31,6 @@ import Darwin
 //           NSTask internally, so exit can never be missed regardless of timing.
 
 public actor TimedShellExecutor: ShellExecutorProtocol {
-
     /// SIGKILL grace period after SIGTERM. 1 second is sufficient for
     /// well-behaved processes; D-state processes are killed forcibly by SIGKILL.
     private static let sigtermGracePeriod: TimeInterval = 1.0
@@ -50,7 +50,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
     ///   Default 4 is conservative to keep GCD thread usage far below the 64
     ///   soft limit even if the entire mop scan races.
     public init(maxConcurrent: Int = 4) {
-        self.semaphore = AsyncSemaphore(limit: maxConcurrent)
+        semaphore = AsyncSemaphore(limit: maxConcurrent)
     }
 
     /// Execute a command and return its full output at exit.
@@ -115,7 +115,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         // while all cooperative threads are IDLE waiting on blocked semaphore.wait() calls.
         // Task.detached runs on the cooperative pool without actor isolation, so signal()
         // fires immediately after the subprocess exits, regardless of mailbox depth.
-        let semaphore = self.semaphore  // capture by value — no self. in closure
+        let semaphore = self.semaphore // capture by value — no self. in closure
         defer { Task.detached { await semaphore.signal() } }
 
         return try await withTaskCancellationHandler {
@@ -136,6 +136,33 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
 
     // MARK: - Core spawn implementation (nonisolated static)
 
+    // MARK: - Launch plan
+
+    /// How `args` are launched: an ABSOLUTE `args[0]` is exec'd directly; a
+    /// bare name goes through `/usr/bin/env` for the PATH lookup.
+    ///
+    /// Why the distinction matters: `/usr/bin/env` is a SIP-restricted binary,
+    /// and the kernel strips every `DYLD_*` variable from a restricted
+    /// process's environment — so a child launched THROUGH it can never
+    /// receive `DYLD_FRAMEWORK_PATH` / `DYLD_LIBRARY_PATH`, whatever `env`
+    /// said. Measured 2026-09-25 (kagami, spec 6d5f3f5e W2):
+    /// `swiftpm-testing-helper` exec'd directly with those two variables ran
+    /// 29 events; the same argv through `/usr/bin/env` died in
+    /// dlopen(XCTest.framework), exit 133. A caller that resolved its
+    /// executable to an absolute path gets exactly the exec it asked for.
+    public struct LaunchPlan: Equatable, Sendable {
+        public let executable: String
+        public let arguments: [String]
+    }
+
+    /// Pure and tested: absolute `args[0]` → direct exec; otherwise `/usr/bin/env`.
+    public static func launchPlan(for args: [String]) -> LaunchPlan {
+        guard let first = args.first, first.hasPrefix("/") else {
+            return LaunchPlan(executable: "/usr/bin/env", arguments: args)
+        }
+        return LaunchPlan(executable: first, arguments: Array(args.dropFirst()))
+    }
+
     private static func spawnAndWait(
         args: [String],
         cwd: String?,
@@ -149,8 +176,9 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
 
         // Build the process.
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = args
+        let plan = launchPlan(for: args)
+        proc.executableURL = URL(fileURLWithPath: plan.executable)
+        proc.arguments = plan.arguments
 
         if let cwd = cwd {
             proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
@@ -158,7 +186,9 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
 
         if let extraEnv = env, !extraEnv.isEmpty {
             var merged = ProcessInfo.processInfo.environment
-            for (k, v) in extraEnv { merged[k] = v }
+            for (k, v) in extraEnv {
+                merged[k] = v
+            }
             proc.environment = merged
         }
 
@@ -172,10 +202,10 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         // macOS Pipe() does NOT set O_CLOEXEC by default; this is the root cause
         // that defeated PRs #585 → #596 → #657 → #714 → #719.
         #if canImport(Darwin)
-        fcntl(stdoutPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-        fcntl(stderrPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-        fcntl(stdoutPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
-        fcntl(stderrPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
+            fcntl(stdoutPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
+            fcntl(stderrPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
+            fcntl(stdoutPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
+            fcntl(stderrPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
         #endif
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
@@ -268,7 +298,8 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
                 } catch {
                     guard_.tryResume {
                         continuation.resume(throwing: ShellError.launchFailed(
-                            args: args, underlying: error.localizedDescription))
+                            args: args, underlying: error.localizedDescription
+                        ))
                     }
                 }
             }
@@ -334,7 +365,7 @@ private final class PipeDrain: @unchecked Sendable {
             guard let self else { return }
             let chunk = h.availableData
             if chunk.isEmpty {
-                self.finish()  // EOF — all write-ends closed.
+                self.finish() // EOF — all write-ends closed.
             } else {
                 self.lock.lock()
                 self.buffer.append(chunk)
@@ -347,7 +378,9 @@ private final class PipeDrain: @unchecked Sendable {
     }
 
     /// Finish with the accumulated data regardless of EOF (post-exit grace).
-    func forceFinish() { finish() }
+    func forceFinish() {
+        finish()
+    }
 
     private func finish() {
         lock.lock()
@@ -382,11 +415,10 @@ private final class PipeDrain: @unchecked Sendable {
 
 // MARK: - Convenience extensions
 
-extension TimedShellExecutor {
-
+public extension TimedShellExecutor {
     /// Run a command and return stdout as a trimmed string.
     /// Returns empty string on non-zero exit (mirrors legacy `run()` behaviour).
-    public func runString(
+    func runString(
         _ args: [String],
         cwd: String? = nil,
         timeout: TimeInterval = 10
@@ -399,7 +431,7 @@ extension TimedShellExecutor {
 
     /// Run a command and return the exit code.
     /// Returns -1 on launch failure, `timeout_exit_code` on timeout.
-    public func runExitCode(
+    func runExitCode(
         _ args: [String],
         cwd: String? = nil,
         timeout: TimeInterval = 10
