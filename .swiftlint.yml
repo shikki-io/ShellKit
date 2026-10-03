@@ -60,7 +60,18 @@ excluded:
   - Package.swift
 
 reporter: "xcode"
-baseline: .swiftlint-baseline.json
+
+# NO fleet-wide `baseline:` key. A baseline is a PER-REPO CONTRACT, and
+# declaring one here did two bad things:
+#   · swiftlint warns "Cannot open or read the baseline file" in every repo that
+#     adopted the config without creating one — which the hooks then treated as
+#     a violation and BLOCKED EVERY PUSH (measured 2026-10-03 in ShellKit, right
+#     after it adopted the config).
+#   · it invites "generate a baseline to get the gate to pass". ShikkiMCP#20
+#     arrived with a 272-violation, 114 KB baseline created for exactly that
+#     reason; it had to be cut to 14 entries scoped to one file.
+# A repo that genuinely needs a baseline adds `baseline: .swiftlint-baseline.json`
+# to its own copy, deliberately, and owns shrinking it.
 
 custom_rules:
   # A FIXME/TODO is debt with an address. Allowed forms — the reference is the
