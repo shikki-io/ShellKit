@@ -1,5 +1,5 @@
-@testable import ShellKit
 import XCTest
+@testable import ShellKit
 #if canImport(Darwin)
     import Darwin
 #endif
@@ -53,7 +53,7 @@ final class TimedShellExecutorTests: XCTestCase {
                 stdin: nil
             )
             XCTFail("Expected ShellError.timeout but run() returned normally")
-        } catch let ShellError.timeout(args, limit) {
+        } catch ShellError.timeout(let args, let limit) {
             let elapsed = Date().timeIntervalSince(start)
             // Should complete within timeout + grace (2s + 1s) + 0.5s scheduling margin
             XCTAssertLessThanOrEqual(elapsed, 4.0, "Timeout took too long: \(elapsed)s")
@@ -75,7 +75,7 @@ final class TimedShellExecutorTests: XCTestCase {
         // Full 134 would take too long for a unit test; 20 exercises the semaphore.
         let callCount = 20
         let results: [ShellCommandResult] = try await withThrowingTaskGroup(of: ShellCommandResult.self) { group in
-            for _ in 0 ..< callCount {
+            for _ in 0..<callCount {
                 group.addTask {
                     try await executor.run(
                         ["echo", "ok"],
@@ -240,7 +240,7 @@ final class TimedShellExecutorTests: XCTestCase {
     func testNSTaskKqueueRaceFastChild() async throws {
         let executor = TimedShellExecutor(maxConcurrent: 1)
         let start = Date()
-        for _ in 0 ..< 50 {
+        for _ in 0..<50 {
             _ = try await executor.run(["/usr/bin/true"], cwd: nil, env: nil, timeout: 2, stdin: nil)
         }
         let elapsed = Date().timeIntervalSince(start)
@@ -276,7 +276,7 @@ final class TimedShellExecutorTests: XCTestCase {
         var handles: [Task<Void, Error>] = []
         handles.reserveCapacity(concurrency)
 
-        for i in 0 ..< concurrency {
+        for i in 0..<concurrency {
             let handle = Task.detached {
                 _ = try await executor.run(
                     ["echo", "stress-\(i)"],

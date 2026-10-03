@@ -121,10 +121,28 @@ if [ -n "$FORMAT_OUT" ]; then
 fi
 
 LINT_OUT=$(swiftlint lint --strict --quiet --config "$CONFIG" "${FILES[@]}" 2>&1 || true)
+# A TOOL DIAGNOSTIC IS NOT A CODE VIOLATION.
+#
+# This used to be `if [ -n "$LINT_OUT" ]` — ANY output failed the push. swiftlint
+# writes its own diagnostics to the same stream, e.g.
+#   warning: Cannot open or read the baseline file at path '.swiftlint-baseline.json'.
+# so a repo that adopted the fleet config without creating a baseline could not
+# push AT ALL, and the "violation" printed was a message about a missing file.
+# Measured 2026-10-03 in ShellKit immediately after it adopted the config.
+#
+# A real violation under `reporter: "xcode"` is `path:line:col: error|warning:`.
+# A tool diagnostic has no file:line:col. Both are still PRINTED — the operator
+# should see the warning — but only the former blocks.
+LINT_VIOLATIONS=$(printf '%s\n' "$LINT_OUT" | grep -E '^.+:[0-9]+:[0-9]+: (error|warning):' || true)
 if [ -n "$LINT_OUT" ]; then
-    echo -e "${RED}${BOLD}[pre-push] SwiftLint violations:${RESET}"
-    echo "$LINT_OUT"
-    FAILED=1
+    if [ -n "$LINT_VIOLATIONS" ]; then
+        echo -e "${RED}${BOLD}[pre-push] SwiftLint violations:${RESET}"
+        echo "$LINT_VIOLATIONS"
+        FAILED=1
+    else
+        echo -e "${YELLOW}[pre-push] swiftlint diagnostics (not blocking):${RESET}"
+        echo "$LINT_OUT"
+    fi
 fi
 
 # ── Notice — referenced pending markers ──────────────────────────────────────
@@ -157,7 +175,13 @@ if [ -n "$NOTICES" ]; then
     printf '  addressed by: %s\n' "$NOTICE_REFS"
 fi
 if [ "${#INCLUDED[@]}" -gt 0 ]; then
-    NOTICE_TOTAL=$(grep -rnE "$NOTICE_RE" --include='*.swift' -- "${INCLUDED[@]}" 2>/dev/null | wc -l | tr -d ' ')
+    # `grep` exits 1 when it matches NOTHING, and under `set -euo pipefail`
+    # that non-zero status propagates out of the pipeline and `set -e` kills
+    # the hook — so a repo with zero pending markers (the healthy case) could
+    # not commit or push at all, with no message. Measured 2026-10-03 in
+    # ShikkiMCP: "silently killed the hook, blocking all pushes".
+    # `|| true` keeps the tally a tally.
+    NOTICE_TOTAL=$({ grep -rnE "$NOTICE_RE" --include='*.swift' -- "${INCLUDED[@]}" 2>/dev/null || true; } | wc -l | tr -d ' ')
     if [ "$NOTICE_TOTAL" -gt 0 ]; then
         printf '%b[pre-push] notice:%b repository total: %s referenced pending marker(s) under %s\n' "${CYAN}${BOLD}" "${RESET}" "$NOTICE_TOTAL" "${INCLUDED[*]}"
     fi

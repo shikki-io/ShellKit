@@ -26,6 +26,13 @@ public actor AsyncSemaphore {
 
     /// Acquire a permit. Suspends if none are available.
     public func wait() async {
+        // `empty_count` is a COLLECTION rule — `array.count > 0` -> `isEmpty`.
+        // `count` here is a permit counter, not a collection, and "is the
+        // semaphore empty?" is ambiguous (no permits, or no waiters?). PR #8
+        // applied the rule mechanically and wrote `!isEmpty` without defining
+        // `isEmpty`, so the branch did not compile — caught by the ShellKit
+        // gate, not by GitHub's MERGEABLE.
+        // swiftlint:disable:next empty_count
         if count > 0 {
             count -= 1
             return
