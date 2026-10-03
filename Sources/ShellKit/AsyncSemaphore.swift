@@ -26,7 +26,7 @@ public actor AsyncSemaphore {
 
     /// Acquire a permit. Suspends if none are available.
     public func wait() async {
-        if count > 0 {
+        if !isEmpty {
             count -= 1
             return
         }
