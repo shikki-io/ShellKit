@@ -1,0 +1,269 @@
+# SwiftFormat configuration — fleet baseline
+# Tool: https://github.com/nicklockwood/SwiftFormat (v0.62+)
+#
+# House-style rules (operator-ratified 2026-08-17):
+#  • Trailing commas always (syncs with .swiftlint.yml trailing_comma: mandatory_comma: true)
+#  • Single-line @Option/@Flag/@Argument — NEVER expand to multi-line
+#    (PR #1550, PR #1572 review 3792839879; see memory feedback_swift-format-oneliner-annotations)
+#  • 4-space indentation, 120-char soft line limit (generous: prefer --maxwidth 160 to avoid
+#    forcing wraps on @Option help strings)
+
+--swiftversion 5.9
+
+# Indentation
+--indent 4
+--tabwidth 4
+--indentcase false
+
+# Line length — NO limit.
+#
+# This file used to say `--maxwidth 160`, with the rationale "generous limit avoids
+# collapsing @Option(help: "long string") to multi-line". `none` serves that stated intent
+# strictly better: 160 still wraps, it just wraps later. Measured on shi-qa develop, one
+# `@Option` in VideoEncodeCommand.swift carries a ~190-char help string and WAS split into
+# four lines by the 160 limit — exactly the "shit on multi lines" form this config exists
+# to prevent (PR #1550, PR #1572).
+#
+# It is also what shikki's root config uses, and it is the single largest source of
+# divergence between the two: develop measured against this template went 125 -> 108 files
+# (of 288) by changing only this one option. Line length is a review judgement, not a
+# formatter's call.
+--maxwidth none
+
+# Argument wrapping — PRESERVE existing single-line form; do not auto-expand
+# This is the key rule that keeps @Option/@Flag/@Argument on one line.
+--wraparguments preserve
+--wrapparameters preserve
+--wrapcollections preserve
+--wrapreturntype preserve
+--wrapconditions preserve
+
+# Commas
+--commas always
+
+# Semicolons
+# "inline" removes trailing semicolons (let x = 1;) but PRESERVES inline semicolons
+# inside single-line closure bodies (DispatchQueue.global().async { a(); b() }).
+# "never" was converting those inline semicolons to newlines, which exploded compact
+# one-liners into multiline form — violating the operator's standing rule.
+--semicolons inline
+
+# Imports
+--importgrouping testable-bottom
+
+# Blank lines
+--emptybraces no-space
+--linebreaks lf
+--trimwhitespace always
+
+# Braces
+--allman false
+--elseposition same-line
+# guardelse: NEXT-LINE. Third and final position on this in one day; the history matters
+# because two of the three were mine and both were wrong.
+#
+#   #6  set `next-line`      -> operator saw the diff and objected
+#   #7  reverted to `auto`   -> MY MISREADING of what they objected to
+#   #8  restores `next-line` -> what the rule actually said all along
+#
+# The house rule, operator 2026-09-16: "we have two ways to declare a guard in swift: it's
+# one-line, or if not it's a statement and the else is on the next line with the brace {".
+# That is `next-line`, unambiguously. What they objected to in #6 was never the `else`
+# placement — it was the LONE `)` sitting on its own line above it:
+#
+#     )                          <- the complaint
+#     else {                     <- not the complaint
+#
+# The `)` is a wrapArguments matter, not a guardelse one. Their preferred form attaches the
+# closing paren to the last argument:
+#
+#     guard let d = make(url as CFURL,
+#                        "png" as CFString,
+#                        nil)    <- last argument owns the paren
+#     else {
+#
+# Measured: that form is ONLY produced with `wrapArguments` ENABLED (verified on a probe —
+# with it disabled, all six combinations of --wraparguments x --closingparen leave the `)`
+# alone). Enabling it would re-wrap every call site in the codebase, which is exactly why
+# shikki disables it. Operator ruling: keep wrapArguments DISABLED, write the preferred
+# form by hand, and let the formatter preserve it.
+#
+# So: `next-line` governs the `else`, and nothing governs the paren. A lone `)` is the
+# author's formatting and is left alone.
+--guardelse next-line
+
+# Self
+--self remove
+--selfrequired []
+
+# Closures
+--trailingclosures all
+--nospaceoperators ..., ..<
+
+# Types
+--shortoptionals always
+
+# ---- Options adopted from shikki's root config (measured, not copied wholesale) ----
+#
+# Each option below was bisected against shi-qa develop (288 files) one at a time. Only
+# these two moved the needle; the five other differences between this template and
+# shikki's config (--swiftversion 6.0, --xcodeindentation enabled, --ranges no-space,
+# dropping --trailingclosures, dropping --shortoptionals) measured ZERO change on that
+# tree and are therefore left as they are rather than churned for symmetry.
+#
+#   --patternlet inline          125 -> 111 files
+#   --stripunusedargs closure-only  125 -> 111 files
+--patternlet inline
+--stripunusedargs closure-only
+
+# Never walk build products or vendored checkouts. This template previously declared no
+# exclusions at all, so a consumer running `swiftformat .` from the repo root could format
+# code it does not own — dependency sources under .build/checkouts are not ours to restyle,
+# and reformatting them produces diffs that vanish on the next `swift package resolve`.
+--exclude **/.build,**/checkouts,**/DerivedData,**/.worktrees,**/Package.resolved
+
+# Rules to disable (handled by swift-format or project style, or deliberately suppressed)
+#
+# modifierOrder: swiftformat wants "public nonisolated"; swiftlint modifier_order wants
+#   "nonisolated public". Pre-commit runs swiftformat THEN swiftlint --fix, so swiftlint
+#   always wins at commit time. Pre-push swiftformat --lint then sees the swiftlint-ordered
+#   form and fails — an infinite standoff. Resolution: swiftlint owns modifier ordering;
+#   swiftformat must stay silent. (shikki PR #1644 / shi-qa PR C — 2026-08-31)
+#
+# wrapIfStatementBodies: expands `if cond { body }` to multi-line, violating the
+#   operator's standing rule that compact author-shaped one-liners are left alone.
+#   (memory: feedback_compact-oneliners-never-expand-author-shaped-code)
+#
+# wrapLoopBodies: same rationale as wrapIfStatementBodies — keeps `for x in xs { f(x) }`
+#   on one line if the author wrote it that way.
+#
+# preferKeyPath: rewrites `xs.map { $0.a.b }` into `xs.map(\.a.b)`. On a collection of
+#   existential metatypes the key-path form does not merely fail to compile — it CRASHES
+#   swift-frontend in SIL lowering (ASTLoweringRequest, signal 6) and takes the whole
+#   target down with it. Measured 2026-09-01 on shi-moto:
+#     MotoCommand.configuration.subcommands.compactMap { $0.configuration.commandName }
+#   where `subcommands` is [any ParsableCommand.Type]. The closure form compiles; the
+#   rewrite does not. A formatter must never be able to produce non-compiling code, and
+#   the closure form is perfectly readable, so the rule is off fleet-wide rather than
+#   suppressed per site — scattering `swiftformat:disable:next` comments through the
+#   codebase to dodge a rule is not a fix (operator, 2026-09-01).
+#
+# wrapFunctionBodies / wrapPropertyBodies: the same standing rule as wrapIfStatementBodies
+#   and wrapLoopBodies, applied to `func round3(_ x: Double) -> Double { (x * 1000).rounded() / 1000 }`
+#   and `var count: Int { items.count }`. Leaving them enabled was an oversight — the rule
+#   was stated for `if` and `for` bodies and then not carried to the other two members of
+#   the same family. Measured on the first fleet-wide sweep (shi-qa, 2026-09-16):
+#   swiftformat expanded 102 author-written one-liners, turning
+#   `public var count: Int { diagnostics.count }` into three lines across 250 files.
+#   swiftformat itself names the culprits — `--verbose` reports "rules applied:
+#   blankLinesBetweenScopes, wrapFunctionBodies and wrapPropertyBodies". Disabling both
+#   drops the count to 0 on a probe and 102 -> 0 real expansions on the tree.
+#   With all four off, the config never EXPANDS an author one-liner; the only remaining
+#   transformation is `elseOnSameLine` joining a multi-line `guard … else {`, which moves
+#   in the same direction. (memory: feedback_compact-oneliners-never-expand-author-shaped-code)
+#
+# ---- Everything below adopts shikki's root .swiftformat as the fleet SSoT ----
+#
+# 2026-09-16. This template was authored independently of shikki's root config and
+# ended up MUCH more aggressive than it: shikki disables 56 rules, this file disabled
+# 10 — and it `--enable`d two that shikki explicitly disables (`blankLinesBetweenScopes`,
+# `sortImports`). A repo adopting the template therefore got a different house style
+# from the repo the style was taken from.
+#
+# Measured on shi-qa, 2026-09-16, against shikki's root config:
+#   develop before the fleet sweep ..... 47 / 288 files diverge
+#   develop after the fleet sweep ...... 100 / 288 files diverge
+# The sweep moved the tree FURTHER from the house style — 119 column-aligned trailing
+# comments collapsed across 44 files, 24 `guard … else` braces pushed onto their own
+# line, ~200 blank lines inserted at MARK comments, imports reordered, extensions
+# rewritten to `public extension`, and raw values stripped from enum cases.
+#
+# shikki's header states the principle, tuned against a rule histogram over ShiKit
+# (2026-07-22): "Opinion rules OFF: they reorganize code, which is review noise …
+# every disable below either RESHAPES lines an author placed deliberately or fights
+# a measured house convention. Column alignment is a house style (529 aligned-spacing
+# sites) — keep it."
+#
+# So the fleet baseline IS shikki's set. Two rules this template adds on top are kept
+# (`redundantSelf`, `todos`); the two contradictory `--enable`s are removed. Nothing
+# else in this file changes.
+#
+# consecutiveSpaces is the one the operator asked for by name: it collapses the runs of
+# spaces that align trailing comments and `=` in sibling lines. Nothing in the Swift
+# toolchain ADDS that alignment — it is written by hand, and the config's only job is
+# to promise not to destroy it.
+# (memory: feedback_column-align-runs-of-sibling-lines-consecutivespaces-off-by-design)
+#
+# wrapMultilineStatementBraces is the other: on a `guard` whose condition spans lines it
+# moves the `{` onto its own line, producing the Allman form `--allman false` rejects.
+
+# Column alignment is a house style — keep it.
+--disable consecutiveSpaces
+# The repo's `//` comments above decls are deliberate; no ///-promotion.
+--disable docComments
+# Reshapes: if/else → single assignment, && → comma, body wrap/unwrap, filter{}.count.
+--disable conditionalAssignment
+--disable andOperator
+--disable preferCountWhere
+# Author-shaped one-liners are left alone — all five members of the family.
+--disable wrapIfStatementBodies
+--disable wrapLoopBodies
+--disable wrapFunctionBodies
+--disable wrapPropertyBodies
+--disable wrapConditionalBodies
+--disable wrapGuardStatementBodies
+--disable wrapIfExpressionBodies
+# Blank-line and already-wrapped-argument re-alignment — noise.
+#
+# EXCEPTION, operator 2026-09-16: `blankLinesBetweenScopes` stays ENABLED. shikki's root
+# config disables it, but — "I'm not strict with that and I'm the first one to add more
+# free lines to breath and made the code easier to read". The rule only ever INSERTS a
+# blank line between scopes, which is what the operator does by hand anyway, so it is
+# not the reshaping class the rest of this block guards against.
+--disable consistentSwitchCaseSpacing
+--disable blankLinesAroundMark
+--disable blankLinesAtStartOfScope
+--disable blankLinesAtEndOfScope
+--disable blankLinesBetweenImports
+--disable wrapArguments
+--disable wrapMultilineStatementBraces
+# Declaration order and shape are the author's.
+#
+# EXCEPTION, operator 2026-09-16: `sortImports` stays ENABLED — "sort imports is
+# important". shikki's root config disables it; the operator's ruling overrides that for
+# the fleet baseline. Import order is mechanical and has no authorial intent to protect,
+# unlike declaration order below. `--importgrouping testable-bottom` decides the grouping.
+--disable sortDeclarations
+--disable enumNamespaces
+--disable extensionAccessControl
+--disable genericExtensions
+--disable opaqueGenericParameters
+--disable headerFileName
+--disable indent
+# "Redundant" rewrites that delete deliberate explicitness.
+--disable redundantReturn
+--disable redundantRawValues
+--disable redundantType
+--disable redundantOptionalBinding
+--disable redundantVariable
+--disable redundantClosure
+--disable redundantStaticSelf
+--disable redundantThrows,redundantAsync
+--disable redundantMemberwiseInit,redundantEquatable,redundantViewBuilder,initCoderUnavailable
+--disable redundantPublic,redundantInternal,redundantFileprivate
+--disable redundantSwiftTestingSuite
+--disable redundantSelf
+# Test-shape and naming rules swiftlint or the author owns.
+--disable noForceUnwrapInTests,noForceTryInTests
+--disable swiftTestingTestCaseNames
+--disable todos
+# Hoisting, literals and closure-call shape.
+--disable hoistTry
+--disable hoistAwait
+--disable numberFormatting
+--disable trailingClosures
+--disable preferKeyPath
+# swiftlint owns modifier ordering and trailing commas (see notes above).
+--disable modifierOrder
+--disable trailingCommas
+--disable spaceInsideBrackets
