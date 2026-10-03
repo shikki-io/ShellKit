@@ -157,7 +157,13 @@ if [ -n "$NOTICES" ]; then
     printf '  addressed by: %s\n' "$NOTICE_REFS"
 fi
 if [ "${#INCLUDED[@]}" -gt 0 ]; then
-    NOTICE_TOTAL=$(grep -rnE "$NOTICE_RE" --include='*.swift' -- "${INCLUDED[@]}" 2>/dev/null | wc -l | tr -d ' ')
+    # `grep` exits 1 when it matches NOTHING, and under `set -euo pipefail`
+    # that non-zero status propagates out of the pipeline and `set -e` kills
+    # the hook — so a repo with zero pending markers (the healthy case) could
+    # not commit or push at all, with no message. Measured 2026-10-03 in
+    # ShikkiMCP: "silently killed the hook, blocking all pushes".
+    # `|| true` keeps the tally a tally.
+    NOTICE_TOTAL=$({ grep -rnE "$NOTICE_RE" --include='*.swift' -- "${INCLUDED[@]}" 2>/dev/null || true; } | wc -l | tr -d ' ')
     if [ "$NOTICE_TOTAL" -gt 0 ]; then
         printf '%b[pre-push] notice:%b repository total: %s referenced pending marker(s) under %s\n' "${CYAN}${BOLD}" "${RESET}" "$NOTICE_TOTAL" "${INCLUDED[*]}"
     fi
