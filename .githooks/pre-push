@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# pre-push hook — verify no lint violations in the Swift files THIS PUSH introduces.
+#
+# Scope: only *.swift files changed relative to the integration branch (origin/develop),
+# NOT the whole repo. Accumulated pre-existing debt in untouched files must never block an
+# unrelated push; the gate still catches violations in anything you actually change.
+#
+# History (2026-08-25): the previous version ran `swiftformat . --lint` + `swiftlint
+# --strict` over the ENTIRE repo. Once any pre-existing strict debt accrued on develop
+# (modifier-order, colon-spacing, TODO comments, …) EVERY push was blocked, for everyone,
+# regardless of what it touched — the gate stopped gating new work and just wedged the repo.
+# Changed-files scoping fixes that: you are accountable for what you push, not the backlog.
+#
+# Install: git config core.hooksPath .githooks
+# Requires: swiftformat, swiftlint  (brew install swiftformat swiftlint)
+# Fleet template: https://github.com/shikki-io/swift-lint-fleet-template
+
+set -euo pipefail
+
+BOLD="\033[1m"; RED="\033[31m"; YELLOW="\033[33m"; GREEN="\033[32m"; CYAN="\033[36m"; RESET="\033[0m"
+ZERO="0000000000000000000000000000000000000000"
+
+check_tool() {
+    command -v "$1" &>/dev/null || {
+        echo -e "${RED}${BOLD}ERROR:${RESET} '$1' not found. Install with: brew install $1"
+        echo "       Or skip this hook once with: git push --no-verify"
+        exit 1
+    }
+}
+check_tool swiftformat
+check_tool swiftlint
+
+# Integration branch to diff against (what "new work" is measured relative to).
+BASE_REF="origin/develop"
+git rev-parse --verify --quiet "$BASE_REF" >/dev/null || BASE_REF="origin/main"
+
+# Collect *.swift files each pushed ref introduces vs its merge-base with BASE_REF.
+# Rebase-stable: merging/rebasing develop in does not re-flag develop's own files.
+CHANGED=""
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue   # deleting a ref — nothing to lint
+    base=$(git merge-base "$BASE_REF" "$local_sha" 2>/dev/null || true)
+    if [ -n "$base" ]; then
+        CHANGED+=$'\n'"$(git diff --name-only --diff-filter=ACMR "$base..$local_sha" -- '*.swift' 2>/dev/null || true)"
+    fi
+done
+
+# Dedupe, drop blanks, keep only files that still exist in the worktree AND
+# that the swiftlint config actually governs.
+#
+# The scope filter is not optional. `.swiftlint.yml` declares `included:` (e.g.
+# Sources, Tests), and the baseline is generated over exactly those paths. But
+# swiftlint IGNORES `included:` when it is handed explicit file paths — so
+# without this filter pre-push lints files the config never covers and the
+# baseline can never contain. That is what happened in shi-moto on 2026-09-01:
+# `pre-commit` reported "Swift format + lint: clean" while `pre-push` blocked on
+# two violations in scripts/compute-manifest-checksum.swift, a build script
+# outside `included:`. Two gates, one tree, opposite verdicts.
+#
+# Reading the scope from the config keeps both gates on ONE definition of what
+# is linted. To bring a directory under the linter, add it to `included:` —
+# then it is covered at commit, at push, and in the baseline together, instead
+# of being enforced in one place and invisible in the others.
+CONFIG="${SWIFTLINT_CONFIG:-.swiftlint.yml}"
+INCLUDED=()
+if [ -f "$CONFIG" ]; then
+    # Parse the `included:` block: a list of `  - path` entries terminated by
+    # the next top-level key. No YAML dependency — the block is a flat list.
+    while IFS= read -r inc; do
+        [ -n "$inc" ] && INCLUDED+=("$inc")
+    done < <(awk '
+        /^included:/       { in_block = 1; next }
+        /^[^[:space:]#-]/  { in_block = 0 }
+        in_block && /^[[:space:]]*-[[:space:]]*/ {
+            sub(/^[[:space:]]*-[[:space:]]*/, "")
+            gsub(/^["\047]|["\047]$/, "")
+            if ($0 != "") print $0
+        }
+    ' "$CONFIG")
+fi
+
+in_scope() {
+    # No `included:` declared → the config governs the whole repo, so every
+    # candidate file is in scope. Fail OPEN toward more linting, never less.
+    [ "${#INCLUDED[@]}" -eq 0 ] && return 0
+    local f="$1" p
+    for p in "${INCLUDED[@]}"; do
+        case "$f" in "$p"/*|"$p") return 0 ;; esac
+    done
+    return 1
+}
+
+# Dedupe, drop blanks, keep only files that still exist AND are in config scope.
+FILES=()
+SKIPPED=0
+while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    if in_scope "$f"; then FILES+=("$f"); else SKIPPED=$((SKIPPED + 1)); fi
+done < <(printf '%s\n' "$CHANGED" | sort -u)
+
+# Say what was skipped and why. A file silently dropped from a gate is how a
+# gate stops meaning anything.
+if [ "$SKIPPED" -gt 0 ]; then
+    echo -e "${YELLOW}[pre-push]${RESET} ${SKIPPED} changed Swift file(s) are outside ${CONFIG} \`included:\` (${INCLUDED[*]}) — not linted."
+    echo -e "  They are NOT exempt: add their directory to \`included:\`, regenerate the baseline, and fix what it reports."
+fi
+
+if [ "${#FILES[@]}" -eq 0 ]; then
+    echo -e "${GREEN}[pre-push]${RESET} No changed Swift files in this push — nothing to lint. Allowing."
+    exit 0
+fi
+
+echo -e "${YELLOW}[pre-push]${RESET} Verifying ${#FILES[@]} changed Swift file(s) (vs ${BASE_REF})..."
+FAILED=0
+
+FORMAT_OUT=$(swiftformat "${FILES[@]}" --lint --quiet 2>&1 || true)
+if [ -n "$FORMAT_OUT" ]; then
+    echo -e "${RED}${BOLD}[pre-push] SwiftFormat violations:${RESET}"
+    echo "$FORMAT_OUT"
+    FAILED=1
+fi
+
+LINT_OUT=$(swiftlint lint --strict --quiet --config "$CONFIG" "${FILES[@]}" 2>&1 || true)
+if [ -n "$LINT_OUT" ]; then
+    echo -e "${RED}${BOLD}[pre-push] SwiftLint violations:${RESET}"
+    echo "$LINT_OUT"
+    FAILED=1
+fi
+
+# ── Notice — referenced pending markers ──────────────────────────────────────
+# Three levels, not two. `error` blocks (swiftlint --strict: a warning IS an
+# error here, that is how this fleet refuses debt). `notice` is the third:
+# a `FIXME(spec …)` / `TODO(backlog …)` / `FIXME(memory …)` / `TODO(#n)` is
+# tracked work with an address — allowed by `unreferenced_todo`, and printed
+# HERE, every time, because the people and agents doing the work read this
+# terminal, not an IDE's FIXME navigator. Visible, never blocking. Unreferenced
+# markers are errors and were already reported above.
+#
+# Comment context only (`//`, `/*`, `*` before the marker), the same kinds the
+# lint rule governs, so the tally and the rule count the same things. The
+# reference is taken from the MARKER, never from the rest of the line — a path
+# containing `specs/` or a `#12` in prose must not become a phantom reference.
+# Content is printed with printf '%s': a marker is repo-controlled text and
+# `echo -e` would honour escape sequences inside it.
+NOTICE_MARKER='(TODO|FIXME)[[:space:]]*\(((spec|backlog|memory) [^)]+|#[0-9]+)\)'
+# The prefix must START the line (after indentation), as the lint rule and
+# `kagami lint`'s pending_markers gate require: a `// TODO(...)` inside a
+# string literal further along the line is a fixture, not debt.
+NOTICE_RE="^[[:space:]]*(//+|/\*+|\*|#|--|<!--)[[:space:]]*([-—•][[:space:]]*)?${NOTICE_MARKER}"
+NOTICES=$(grep -nHE "$NOTICE_RE" -- "${FILES[@]}" 2>/dev/null || true)
+if [ -n "$NOTICES" ]; then
+    NOTICE_COUNT=$(printf '%s\n' "$NOTICES" | wc -l | tr -d ' ')
+    printf '%b[pre-push] notice:%b %s referenced pending marker(s) in the files this pre-push touches — tracked, not blocking:\n' "${CYAN}${BOLD}" "${RESET}" "$NOTICE_COUNT"
+    printf '%s\n' "$NOTICES" | sed -E 's#^([^:]+:[0-9]+):.*((TODO|FIXME)[[:space:]]*\()#  \1  \2#' | cut -c1-170
+    NOTICE_REFS=$(printf '%s\n' "$NOTICES" | grep -oE "$NOTICE_MARKER" | sed -E 's/^(TODO|FIXME)[[:space:]]*\(//; s/\)$//' | sort | uniq -c | sort -rn \
+        | awk '{ c = $1; $1 = ""; sub(/^ /, ""); printf "%s (x%d)  ", $0, c }')
+    printf '  addressed by: %s\n' "$NOTICE_REFS"
+fi
+if [ "${#INCLUDED[@]}" -gt 0 ]; then
+    NOTICE_TOTAL=$(grep -rnE "$NOTICE_RE" --include='*.swift' -- "${INCLUDED[@]}" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$NOTICE_TOTAL" -gt 0 ]; then
+        printf '%b[pre-push] notice:%b repository total: %s referenced pending marker(s) under %s\n' "${CYAN}${BOLD}" "${RESET}" "$NOTICE_TOTAL" "${INCLUDED[*]}"
+    fi
+fi
+
+if [ "$FAILED" -eq 1 ]; then
+    echo ""
+    echo -e "${RED}${BOLD}[pre-push] Push blocked — fix the violations above (only files THIS push changes are checked).${RESET}"
+    echo -e "  Fix: swiftformat <files> && swiftlint --fix --config ${CONFIG} <files>"
+    echo -e "  Skip once (NOT recommended): ${BOLD}git push --no-verify${RESET}"
+    exit 1
+fi
+
+echo -e "${GREEN}[pre-push]${RESET} Changed Swift files clean. Allowing push."

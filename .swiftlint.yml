@@ -1,0 +1,88 @@
+# SwiftLint configuration — fleet baseline
+# Ported from shikki main config (2026-08-17).
+# Minimal config: disable rules that conflict with swift-format or project style.
+
+disabled_rules:
+  # Conflicts with swift-format indentation choices
+  - trailing_whitespace
+  - leading_whitespace
+  # swift-format handles line length
+  - line_length
+  # Allow force_cast in test code and CLI internals
+  - force_cast
+  - force_try
+  # swift-format handles opening brace placement
+  - opening_brace
+  # We use // MARK: - consistently
+  - mark
+  # Allow large files in codegen modules
+  - file_length
+  # Allow many cases in enums
+  - type_body_length
+  - function_body_length
+  # Identifier length is too noisy for descriptive Swift naming
+  - identifier_name
+  # The built-in `todo` rule blocks EVERY FIXME/TODO, which hides the ones we
+  # want to see. Operator on shi-qa #202 (2026-09-22): "It has sense to see
+  # them instead of hiding them ... if it's like this it's because we need
+  # them". Replaced by `unreferenced_todo` below: a marker that carries a
+  # reference is visible and allowed; one without a reference still blocks.
+  - todo
+
+# Trailing comma canon: must stay in lockstep with .swiftformat --commas always.
+# Without mandatory_comma: true, swiftlint STRIPS the trailing commas that
+# swiftformat mandates, creating a perpetual flip-flop.
+trailing_comma:
+  mandatory_comma: true
+
+opt_in_rules:
+  - empty_count
+  - closure_spacing
+  - contains_over_filter_count
+  - contains_over_first_not_nil
+  - discouraged_object_literal
+  - empty_string
+  - first_where
+  - last_where
+  - modifier_order
+  - overridden_super_call
+  - reduce_into
+  - redundant_nil_coalescing
+  - sorted_first_last
+  - yoda_condition
+
+included:
+  - Sources
+  - Tests
+
+excluded:
+  - .build
+  - Package.swift
+
+reporter: "xcode"
+baseline: .swiftlint-baseline.json
+
+custom_rules:
+  # A FIXME/TODO is debt with an address. Allowed forms — the reference is the
+  # thing a reader can act on later:
+  #   FIXME(spec <uuid> W<n>): …      the wave that resolves it
+  #   TODO(backlog <id>): …           the @db backlog item
+  #   FIXME(memory <name>): …         the memory file that explains it
+  #   TODO(#<n>): …                   a PR or issue number
+  # A marker is the keyword at the START of a comment (after `//`, `///`, `/*`
+  # or `*`), any case, with or without a colon; the word inside a sentence is
+  # prose. The reference must be REAL: a kind followed by a space and a value
+  # (`spec)`, `backlog )`, `specious nonsense` do not count), or `#` + digits.
+  # Comments only: a string literal that mentions TODO (SlopCommand's own
+  # allowlist) is not debt.
+  # @t panel 2026-09-22 (run 2d41f50f): the first version accepted
+  # `TODO(specious nonsense)`, `FIXME(spec)`, `TODO(#)` and rejected
+  # `TODO (backlog x)`; this is the corrected grammar.
+  unreferenced_todo:
+    name: "Unreferenced TODO/FIXME"
+    regex: '(?i)(//+|/\*+|^\s*\*)\s*([-—•]\s*)?(TODO|FIXME)\b(?!\s*\(((spec|backlog|memory) \S[^)]*|#[0-9]+)\))'
+    match_kinds:
+      - comment
+      - doccomment
+    message: "TODO/FIXME must carry a reference: FIXME(spec <uuid> W<n>), TODO(backlog <id>), FIXME(memory <name>) or TODO(#<n>)"
+    severity: error
