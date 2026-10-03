@@ -3,7 +3,9 @@
 .swiftpm/
 
 # kagami scratch (history shards, caches) — never committed
-.kagami/
+# kagami: the scope registry is source; the cache, runs and tmp are scratch
+.kagami/*
+!.kagami/scopes.override.toml
 
 # moto code-intelligence cache — local tooling artefact, not source
 .moto

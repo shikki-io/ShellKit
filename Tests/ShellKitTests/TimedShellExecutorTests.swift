@@ -1,10 +1,11 @@
-import XCTest
 @testable import ShellKit
+import XCTest
 #if canImport(Darwin)
-import Darwin
+    import Darwin
 #endif
 
 // MARK: - TimedShellExecutorTests
+
 //
 // Scope: ShikkiShellExecutor
 // Tests cover the four mandatory cases from the W1 spec:
@@ -14,12 +15,12 @@ import Darwin
 //   4. Timeout actually SIGKILLs — process is gone after timeout
 
 final class TimedShellExecutorTests: XCTestCase {
-
     // MARK: - 1. Large stdout does not deadlock (H6 fix)
-    //
-    // Pipe buffer on macOS is 64KB. Writing more without a concurrent reader
-    // causes child to block, parent to block on waitUntilExit → deadlock.
-    // TimedShellExecutor drains in parallel Tasks, so this should complete.
+
+    ///
+    /// Pipe buffer on macOS is 64KB. Writing more without a concurrent reader
+    /// causes child to block, parent to block on waitUntilExit → deadlock.
+    /// TimedShellExecutor drains in parallel Tasks, so this should complete.
     func testLargeStdoutNoDeadlock() async throws {
         let executor = TimedShellExecutor(maxConcurrent: 4)
         // Generate 128KB of output via `dd` — well above the 64KB pipe limit.
@@ -36,9 +37,10 @@ final class TimedShellExecutorTests: XCTestCase {
     }
 
     // MARK: - 2. Timeout fires and throws (H1/H3 fix)
-    //
-    // A 5s sleep with a 2s timeout should throw ShellError.timeout in ≤3s.
-    // (+1s SIGTERM grace period)
+
+    ///
+    /// A 5s sleep with a 2s timeout should throw ShellError.timeout in ≤3s.
+    /// (+1s SIGTERM grace period)
     func testTimeoutThrows() async throws {
         let executor = TimedShellExecutor(maxConcurrent: 4)
         let start = Date()
@@ -51,7 +53,7 @@ final class TimedShellExecutorTests: XCTestCase {
                 stdin: nil
             )
             XCTFail("Expected ShellError.timeout but run() returned normally")
-        } catch ShellError.timeout(let args, let limit) {
+        } catch let ShellError.timeout(args, limit) {
             let elapsed = Date().timeIntervalSince(start)
             // Should complete within timeout + grace (2s + 1s) + 0.5s scheduling margin
             XCTAssertLessThanOrEqual(elapsed, 4.0, "Timeout took too long: \(elapsed)s")
@@ -61,18 +63,19 @@ final class TimedShellExecutorTests: XCTestCase {
     }
 
     // MARK: - 3. Bounded concurrency (H7 fix)
-    //
-    // Firing 134 concurrent calls into a maxConcurrent:4 executor should
-    // saturate at 4 concurrent while the rest queue. We verify by measuring
-    // that all 134 complete (none hang) and the wall time is consistent with
-    // bounded concurrency (not sequential, not all-parallel).
+
+    ///
+    /// Firing 134 concurrent calls into a maxConcurrent:4 executor should
+    /// saturate at 4 concurrent while the rest queue. We verify by measuring
+    /// that all 134 complete (none hang) and the wall time is consistent with
+    /// bounded concurrency (not sequential, not all-parallel).
     func testBoundedConcurrency() async throws {
         let executor = TimedShellExecutor(maxConcurrent: 4)
         // Use 20 calls (fast, each ~10ms) to verify no deadlock and completion.
         // Full 134 would take too long for a unit test; 20 exercises the semaphore.
         let callCount = 20
         let results: [ShellCommandResult] = try await withThrowingTaskGroup(of: ShellCommandResult.self) { group in
-            for _ in 0..<callCount {
+            for _ in 0 ..< callCount {
                 group.addTask {
                     try await executor.run(
                         ["echo", "ok"],
@@ -84,7 +87,9 @@ final class TimedShellExecutorTests: XCTestCase {
                 }
             }
             var all: [ShellCommandResult] = []
-            for try await r in group { all.append(r) }
+            for try await r in group {
+                all.append(r)
+            }
             return all
         }
         XCTAssertEqual(results.count, callCount)
@@ -93,10 +98,11 @@ final class TimedShellExecutorTests: XCTestCase {
     }
 
     // MARK: - 4. SIGKILL actually terminates the process
-    //
-    // After a timeout, the child process must be gone (not a zombie).
-    // We verify by calling `kill(pid, 0)` after the timeout fires — it should
-    // return ESRCH (no such process), confirming the process was reaped.
+
+    ///
+    /// After a timeout, the child process must be gone (not a zombie).
+    /// We verify by calling `kill(pid, 0)` after the timeout fires — it should
+    /// return ESRCH (no such process), confirming the process was reaped.
     func testSigkillTerminatesProcess() async throws {
         let executor = TimedShellExecutor(maxConcurrent: 4)
 
@@ -125,7 +131,8 @@ final class TimedShellExecutorTests: XCTestCase {
 
         // Read the PID written by the child.
         guard let pidStr = try? String(contentsOfFile: pidFile, encoding: .utf8),
-              let pid = Int32(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+              let pid = Int32(pidStr.trimmingCharacters(in: .whitespacesAndNewlines))
+        else {
             // If the file wasn't written (process killed before writing), test passes —
             // the process never got to run, so it can't be hanging.
             return
@@ -146,6 +153,7 @@ final class TimedShellExecutorTests: XCTestCase {
     }
 
     // MARK: - 5. Non-zero exit code is returned correctly (not thrown)
+
     func testNonZeroExitCodeReturned() async throws {
         let executor = TimedShellExecutor(maxConcurrent: 4)
         let result = try await executor.run(
@@ -159,10 +167,11 @@ final class TimedShellExecutorTests: XCTestCase {
     }
 
     // MARK: - 6. Unknown command returns non-zero exit (not a hang)
-    //
-    // Note: `env` on macOS resolves unknown commands by returning exit 1 or
-    // 127 without blocking — so the executor returns a result, not a thrown error.
-    // We verify it returns quickly (no hang) with a non-zero exit code.
+
+    ///
+    /// Note: `env` on macOS resolves unknown commands by returning exit 1 or
+    /// 127 without blocking — so the executor returns a result, not a thrown error.
+    /// We verify it returns quickly (no hang) with a non-zero exit code.
     func testUnknownCommandReturnsQuickly() async throws {
         let executor = TimedShellExecutor(maxConcurrent: 4)
         let start = Date()
@@ -180,6 +189,31 @@ final class TimedShellExecutorTests: XCTestCase {
     }
 
     // MARK: - 7. runString convenience returns stdout
+
+    // MARK: - Launch plan (absolute executable execs directly — DYLD_* survive)
+
+    func testAbsoluteExecutableIsExecdDirectly() {
+        let plan = TimedShellExecutor.launchPlan(for: ["/usr/bin/true", "--flag", "x"])
+        XCTAssertEqual(plan, .init(executable: "/usr/bin/true", arguments: ["--flag", "x"]))
+    }
+
+    func testBareNameGoesThroughEnvForPathLookup() {
+        let plan = TimedShellExecutor.launchPlan(for: ["true", "--flag"])
+        XCTAssertEqual(plan, .init(executable: "/usr/bin/env", arguments: ["true", "--flag"]))
+    }
+
+    func testEmptyArgvStillHasAnExecutable() {
+        XCTAssertEqual(TimedShellExecutor.launchPlan(for: []).executable, "/usr/bin/env")
+    }
+
+    func testAbsoluteExecutableRunsAndReturnsItsExitCode() async throws {
+        let executor = TimedShellExecutor()
+        let result = try await executor.run(["/usr/bin/false"], timeout: 5)
+        XCTAssertEqual(result.exitCode, 1)
+        let ok = try await executor.run(["/usr/bin/true"], timeout: 5)
+        XCTAssertEqual(ok.exitCode, 0)
+    }
+
     func testRunStringConvenience() async {
         let executor = TimedShellExecutor(maxConcurrent: 4)
         let out = await executor.runString(["echo", "hello world"], timeout: 5)
@@ -187,6 +221,7 @@ final class TimedShellExecutorTests: XCTestCase {
     }
 
     // MARK: - 8. runExitCode convenience returns exit code
+
     func testRunExitCodeConvenience() async {
         let executor = TimedShellExecutor(maxConcurrent: 4)
         let code = await executor.runExitCode(["sh", "-c", "exit 7"], timeout: 5)
@@ -194,39 +229,41 @@ final class TimedShellExecutorTests: XCTestCase {
     }
 
     // MARK: - 9. W1.3 NSTask kqueue EVFILT_PROC race — terminationHandler wired before run()
-    //
-    // Fast children (e.g. /usr/bin/true) can exit between posix_spawn returning
-    // and the old `Task.detached { waitUntilExit() }` subscribing to kqueue.
-    // With the W1.2 code: ~1/50 iterations would hang indefinitely.
-    // With the W1.3 fix:  all 50 return cleanly — terminationHandler is set
-    //                     on the Process object before proc.run() so exit cannot
-    //                     be missed regardless of timing.
+
+    ///
+    /// Fast children (e.g. /usr/bin/true) can exit between posix_spawn returning
+    /// and the old `Task.detached { waitUntilExit() }` subscribing to kqueue.
+    /// With the W1.2 code: ~1/50 iterations would hang indefinitely.
+    /// With the W1.3 fix:  all 50 return cleanly — terminationHandler is set
+    ///                     on the Process object before proc.run() so exit cannot
+    ///                     be missed regardless of timing.
     func testNSTaskKqueueRaceFastChild() async throws {
         let executor = TimedShellExecutor(maxConcurrent: 1)
         let start = Date()
-        for _ in 0..<50 {
+        for _ in 0 ..< 50 {
             _ = try await executor.run(["/usr/bin/true"], cwd: nil, env: nil, timeout: 2, stdin: nil)
         }
         let elapsed = Date().timeIntervalSince(start)
         XCTAssertLessThan(elapsed, 5.0,
-            "50 /usr/bin/true took \(elapsed)s — NSTask kqueue race regression (W1.3 fix missing?)")
+                          "50 /usr/bin/true took \(elapsed)s — NSTask kqueue race regression (W1.3 fix missing?)")
     }
 
     // MARK: - 10. W1.1 Semaphore signal under actor-mailbox load (H7.1 regression test)
-    //
-    // Reproduces the actor-mailbox starvation pattern that snuck past the original 8/8
-    // test suite. The bug: `defer { Task { await self.semaphore.signal() } }` queues on
-    // the actor mailbox. Under load (many concurrent callers, semaphore limit 4) those
-    // signal Tasks pile up behind the pending wait() callers and may never execute.
-    //
-    // With the bug:  hangs permanently (deadlock in actor mailbox queue)
-    // With the fix:  completes in <10s (20 echo calls at 4-concurrency → ~5 batches)
-    //
-    // Design to amplify mailbox interleaving:
-    //   - Task.detached spawners: bypass structured concurrency so all 20 Tasks queue
-    //     on the cooperative pool simultaneously, maximising actor mailbox depth.
-    //   - semaphore limit 2 (not 4): starves faster — 18 waiters vs 16.
-    //   - Wall-clock assertion <15s: conservative; 20 echo calls complete in <1s normally.
+
+    ///
+    /// Reproduces the actor-mailbox starvation pattern that snuck past the original 8/8
+    /// test suite. The bug: `defer { Task { await self.semaphore.signal() } }` queues on
+    /// the actor mailbox. Under load (many concurrent callers, semaphore limit 4) those
+    /// signal Tasks pile up behind the pending wait() callers and may never execute.
+    ///
+    /// With the bug:  hangs permanently (deadlock in actor mailbox queue)
+    /// With the fix:  completes in <10s (20 echo calls at 4-concurrency → ~5 batches)
+    ///
+    /// Design to amplify mailbox interleaving:
+    ///   - Task.detached spawners: bypass structured concurrency so all 20 Tasks queue
+    ///     on the cooperative pool simultaneously, maximising actor mailbox depth.
+    ///   - semaphore limit 2 (not 4): starves faster — 18 waiters vs 16.
+    ///   - Wall-clock assertion <15s: conservative; 20 echo calls complete in <1s normally.
     func testSemaphoreSignalUnderActorMailboxLoad() async throws {
         // Use limit:2 to maximise waiter count (20 callers - 2 permits = 18 waiters).
         let executor = TimedShellExecutor(maxConcurrent: 2)
@@ -239,7 +276,7 @@ final class TimedShellExecutorTests: XCTestCase {
         var handles: [Task<Void, Error>] = []
         handles.reserveCapacity(concurrency)
 
-        for i in 0..<concurrency {
+        for i in 0 ..< concurrency {
             let handle = Task.detached {
                 _ = try await executor.run(
                     ["echo", "stress-\(i)"],
@@ -262,8 +299,8 @@ final class TimedShellExecutorTests: XCTestCase {
         // 20 echo calls at maxConcurrent:2 → 10 serial batches × ~5ms = ~50ms normal.
         // Any value >15s indicates starvation.
         XCTAssertLessThan(elapsed, 15.0,
-            "Semaphore signal starvation detected: \(elapsed)s (expected <15s). " +
-            "Actor-mailbox starvation — Task.detached fix may be missing.")
+                          "Semaphore signal starvation detected: \(elapsed)s (expected <15s). " +
+                              "Actor-mailbox starvation — Task.detached fix may be missing.")
     }
 
     // MARK: - W1.4 bounded post-exit drains (mop-gh hang, shikki @db c6e806e7)
@@ -289,11 +326,13 @@ final class TimedShellExecutorTests: XCTestCase {
         XCTAssertEqual(
             result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines),
             "hi",
-            "output written before exit must be captured")
+            "output written before exit must be captured"
+        )
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertLessThan(
             elapsed, 8.0,
             "post-exit drain must be bounded by the grace period, "
-                + "not the grandchild's lifetime (took \(elapsed)s)")
+                + "not the grandchild's lifetime (took \(elapsed)s)"
+        )
     }
 }
