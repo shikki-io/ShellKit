@@ -11,3 +11,19 @@ test_file_patterns = ["**/ShellKitTests/TimedShellExecutorTests.swift"]
 expected_test_min = 12
 timeout_seconds = 600
 description = "ShellKit — TimedShellExecutor: pipe/deadlock, timeout, concurrency cap, exit codes, and the launch plan (absolute executable execs directly so DYLD_* survive)."
+
+# DetachedProcess — the fire-and-forget launch (2026-10-12). Added because
+# shikki#1789's spec dispatcher, the validated-spec drainer and the flow
+# dispatcher each hand-rolled `Process()` behind a bypass exemption: ShellKit
+# had no primitive that starts a long-running child, keeps its pid for a
+# reaper, and sends its output anywhere but a pipe nobody drains.
+[[scopes]]
+name = "ShellKitDetached"
+language = "swift"
+package_path = "."
+test_target_name = "ShellKitTests"
+type_patterns = ["DetachedProcessTests", "DetachedProcess", "DetachedOutput"]
+test_file_patterns = ["**/ShellKitTests/DetachedProcessTests.swift"]
+expected_test_min = 8
+timeout_seconds = 600
+description = "ShellKit — DetachedProcess: pid for the reaper, chatty child never blocks, output to file or /dev/null, exit code, no shell re-parse, idempotent terminate. Run: kagami test --scope ShellKitDetached --strict"
