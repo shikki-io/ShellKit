@@ -62,6 +62,12 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
     /// acquisition, the detached signal and the cancellation handler in both
     /// methods, which is two copies of the concurrency contract that would
     /// have had to be kept in step by hand.
+    ///
+    /// To receive live output as chunks arrive, call ``runStreaming`` directly
+    /// (via the `ShellExecutorProtocol` reference), or use the convenience
+    /// overload ``run(_:cwd:env:timeout:stdin:onStdout:onStderr:)`` on this
+    /// concrete type. The full output is still returned in `ShellCommandResult`
+    /// so the caller can stream live AND inspect the buffer after exit.
     public func run(
         _ args: [String],
         cwd: String? = nil,
@@ -72,6 +78,38 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         try await runStreaming(
             args, cwd: cwd, env: env, timeout: timeout, stdin: stdin,
             onStdout: nil, onStderr: nil
+        )
+    }
+
+    /// Execute a command, forwarding live output as chunks arrive and
+    /// returning the full output at exit.
+    ///
+    /// Convenience overload of ``run(_:cwd:env:timeout:stdin:)`` on the
+    /// concrete type. Delegates to ``runStreaming`` — all timeout,
+    /// SIGTERM/SIGKILL escalation, concurrency-cap and pipe-deadlock
+    /// guarantees apply unchanged.
+    ///
+    /// - Note: `onStdout`/`onStderr` have no defaults here: they must be
+    ///   passed explicitly so Swift resolves this overload unambiguously from
+    ///   the five-parameter version. Pass `nil` for a channel you don't need.
+    ///
+    ///   This overload exists only on `TimedShellExecutor`, not on
+    ///   `ShellExecutorProtocol`. Callers holding a protocol reference call
+    ///   ``runStreaming`` directly; calling ``run`` through the protocol always
+    ///   buffers (sinks are nil). This is correct for test doubles, which have
+    ///   no live output to emit.
+    public func run(
+        _ args: [String],
+        cwd: String? = nil,
+        env: [String: String]? = nil,
+        timeout: TimeInterval = 10,
+        stdin: Data? = nil,
+        onStdout: (@Sendable (Data) -> Void)?,
+        onStderr: (@Sendable (Data) -> Void)?
+    ) async throws -> ShellCommandResult {
+        try await runStreaming(
+            args, cwd: cwd, env: env, timeout: timeout, stdin: stdin,
+            onStdout: onStdout, onStderr: onStderr
         )
     }
 
