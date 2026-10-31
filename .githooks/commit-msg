@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#
+# commit-msg-shikki.sh — thin exec into `shi hook commit-msg <file>`.
+# SSoT body: shipped as a ShiKit resource; `hooks/commit-msg` and
+# `.githooks/commit-msg` in the shikki repo are symlinks to it, and
+# `shi hook install` writes it into every other shikki-family repo.
+# All logic (banned-marker scan + CommitAttribution trailer append) is
+# in Swift so hooks/commit-msg + hooks/pre-push share ONE SSoT
+# (run 'shi hook --help' for behaviour; spec tracked in @db, not in-repo).
+#
+# Fail-mode matrix (spec):
+#   agent session (SHIKKI_SESSION_ID or CLAUDE_CODE_SESSION_ID present) + `shi` missing / ABI mismatch
+#     ⇒ FAIL CLOSED (refuse the commit; install hint).
+#   human commit (neither present) + `shi` missing / ABI mismatch
+#     ⇒ fail open with one stderr warning. Gate 8 remains.
+#
+# Bypass (audited): SHIKKI_SLOP_ACK=<sha256 of offending line> — one-shot,
+# emits an event with the hash on stderr. No blanket bypass.
+set -u
+MIN_ABI=1
+MSG_FILE="$1"
+AGENT_SESSION="${SHIKKI_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}"
+
+if ! command -v shi >/dev/null 2>&1; then
+    if [ -n "$AGENT_SESSION" ]; then
+        echo "shi hook commit-msg: REFUSED — agent session but 'shi' not on PATH." >&2
+        echo "  install: 'make install' from the shikki repo, or add ~/.local/bin to PATH." >&2
+        echo "  docs:    run 'shi hook --help' (spec in @db, not in-repo)." >&2
+        exit 1
+    fi
+    echo "shi hook commit-msg: WARN — 'shi' not on PATH; commit unchecked (human session)." >&2
+    exit 0
+fi
+
+ABI="$(shi hook abi 2>/dev/null || echo 0)"
+if [ "$ABI" != "$MIN_ABI" ]; then
+    if [ -n "$AGENT_SESSION" ]; then
+        echo "shi hook commit-msg: REFUSED — hook ABI $MIN_ABI, shi reports $ABI (rebuild shi)." >&2
+        exit 1
+    fi
+    echo "shi hook commit-msg: WARN — ABI mismatch (want $MIN_ABI, got $ABI); commit unchecked." >&2
+    exit 0
+fi
+
+exec shi hook commit-msg "$MSG_FILE"
