@@ -180,8 +180,13 @@ if [ "${#INCLUDED[@]}" -gt 0 ]; then
     # the hook — so a repo with zero pending markers (the healthy case) could
     # not commit or push at all, with no message. Measured 2026-10-03 in
     # ShikkiMCP: "silently killed the hook, blocking all pushes".
-    # `|| true` keeps the tally a tally.
-    NOTICE_TOTAL=$({ grep -rnE "$NOTICE_RE" --include='*.swift' -- "${INCLUDED[@]}" 2>/dev/null || true; } | wc -l | tr -d ' ')
+    # Only that exit 1 is expected: exit 2 or more is a real scan error and
+    # fails the hook.
+    NOTICE_TOTAL=$({
+        rc=0
+        grep -rnE "$NOTICE_RE" --include='*.swift' -- "${INCLUDED[@]}" || rc=$?
+        [ "$rc" -le 1 ] || exit "$rc"
+    } | wc -l | tr -d ' ')
     if [ "$NOTICE_TOTAL" -gt 0 ]; then
         printf '%b[pre-push] notice:%b repository total: %s referenced pending marker(s) under %s\n' "${CYAN}${BOLD}" "${RESET}" "$NOTICE_TOTAL" "${INCLUDED[*]}"
     fi
