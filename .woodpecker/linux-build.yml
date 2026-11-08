@@ -1,0 +1,32 @@
+# .woodpecker/linux-build.yml — prove ShellKit builds AND passes its tests on Linux.
+#
+# ShellKit is a Foundation-only leaf package that spawns and supervises child
+# processes (signals, pipes, exit detection). Those are exactly the places where
+# Darwin and Linux differ, so compiling is not enough: the whole suite runs here.
+# Runs on the vendor-neutral official swift Linux image.
+
+when:
+  event: [pull_request, push, manual]  # manual = the "run pipeline" button
+  branch: [main, develop, "epic/*", "feat/*", "fix/*", "agent/*", "story/*"]
+
+# A Linux gate must run on a Linux Docker agent. Without a platform label, any
+# connected agent is eligible, whatever its OS or backend.
+labels:
+  platform: linux/amd64
+
+variables:
+  - &swift_image "swift:6.3-jammy"  # Docker Hub official Linux stable; ShellKit is swift-tools 6.0, within range
+
+steps:
+  linux-build:
+    image: *swift_image
+    commands:
+      - swift --version
+      - swift build
+
+  # Direct SwiftPM on purpose: the Linux gate cannot use the macOS-only test
+  # runner the package uses locally. Replace this once that runner builds on Linux.
+  linux-test:
+    image: *swift_image
+    commands:
+      - swift test
