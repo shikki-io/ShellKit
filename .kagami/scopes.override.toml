@@ -27,3 +27,28 @@ test_file_patterns = ["**/ShellKitTests/DetachedProcessTests.swift"]
 expected_test_min = 8
 timeout_seconds = 600
 description = "ShellKit — DetachedProcess: pid for the reaper, chatty child never blocks, output to file or /dev/null, exit code, no shell re-parse, idempotent terminate. Run: kagami test --scope ShellKitDetached --strict"
+
+# InteractiveProcess + ExecutableResolver (added with the Linux port: these tests
+# were in no scope, so neither platform's gate ever ran them).
+[[scopes]]
+name = "ShellKitInteractive"
+language = "swift"
+package_path = "."
+test_target_name = "ShellKitTests"
+type_patterns = ["InteractiveProcessTests"]
+test_file_patterns = ["**/ShellKitTests/InteractiveProcessTests.swift"]
+expected_test_min = 7
+timeout_seconds = 600
+description = "ShellKit — InteractiveProcess: interleaved exchange, deadline reads, stderr drain, SIGKILL escalation, ExecutableResolver. Run: kagami test --scope ShellKitInteractive --strict"
+
+# runStreaming / ShellExecutorProtocol (Swift Testing), likewise unscoped until now.
+[[scopes]]
+name = "ShellKitStreaming"
+language = "swift"
+package_path = "."
+test_target_name = "ShellKitTests"
+type_patterns = ["RunStreamingTests", "LegacyConformerTests"]
+test_file_patterns = ["**/ShellKitTests/RunStreamingTests.swift"]
+expected_test_min = 8
+timeout_seconds = 600
+description = "ShellKit — TimedShellExecutor.runStreaming: live chunks, independent stderr, timeout kill, protocol fallback. Run: kagami test --scope ShellKitStreaming --strict"
