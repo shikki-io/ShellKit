@@ -50,7 +50,7 @@ public final class DetachedProcess: @unchecked Sendable {
     public var processIdentifier: Int32 { process.processIdentifier }
 
     /// Whether the child is still running.
-    public var isRunning: Bool { process.isRunning }
+    public var isRunning: Bool { !process.hasExited }
 
     /// Spawn `args` and return without waiting.
     ///
@@ -146,11 +146,10 @@ public final class DetachedProcess: @unchecked Sendable {
     /// The child's exit code, awaited without blocking a cooperative thread.
     /// Returns immediately once the child has already exited.
     public func exitCode() async -> Int32 {
-        if !process.isRunning { return process.terminationStatus }
+        if let status = process.exitStatusIfExited { return status }
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async { [process] in
-                process.waitUntilExit()
-                continuation.resume(returning: process.terminationStatus)
+                continuation.resume(returning: process.waitForExit())
             }
         }
     }
@@ -162,13 +161,13 @@ public final class DetachedProcess: @unchecked Sendable {
         defer { lock.unlock() }
         guard !reaped else { return }
         reaped = true
-        guard process.isRunning else { return }
+        guard !process.hasExited else { return }
         process.terminate()
         let deadline = Date().addingTimeInterval(Self.terminationGrace)
-        while process.isRunning, Date() < deadline {
+        while !process.hasExited, Date() < deadline {
             usleep(50_000)
         }
-        if process.isRunning {
+        if !process.hasExited {
             kill(process.processIdentifier, SIGKILL)
         }
     }

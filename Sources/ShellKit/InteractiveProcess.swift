@@ -1,6 +1,8 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
 #endif
 
 // MARK: - ExecutableResolver
@@ -56,6 +58,7 @@ public final class InteractiveProcess: @unchecked Sendable {
     private let stdinWriter: FileHandle
     private let stdoutReader: FileHandle
     private let stderrReader: FileHandle
+    private let stderrPump: PipePump
     private let stderrSink = BoundedSink(capacity: InteractiveProcess.stderrCapacity)
     private let lock = NSLock()
     private var tornDown = false
@@ -67,7 +70,7 @@ public final class InteractiveProcess: @unchecked Sendable {
     /// The spawned child's pid.
     public var processIdentifier: Int32 { process.processIdentifier }
     /// Whether the child is still running.
-    public var isRunning: Bool { process.isRunning }
+    public var isRunning: Bool { !process.hasExited }
     /// Everything the child wrote to stderr so far (bounded), trimmed.
     public var stderrText: String { stderrSink.text() }
 
@@ -88,7 +91,7 @@ public final class InteractiveProcess: @unchecked Sendable {
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        #if canImport(Darwin)
+        #if canImport(Darwin) || canImport(Glibc)
         // Same rule as TimedShellExecutor (W1.2): no pipe end leaks into the
         // next child we spawn, or a reader can wait on a stranger's copy.
         let pipeEnds = [
@@ -97,7 +100,7 @@ public final class InteractiveProcess: @unchecked Sendable {
             stderrPipe.fileHandleForWriting, stderrPipe.fileHandleForReading,
         ]
         for fd in pipeEnds {
-            fcntl(fd.fileDescriptor, F_SETFD, FD_CLOEXEC)
+            _ = fcntl(fd.fileDescriptor, F_SETFD, FD_CLOEXEC)
         }
         #endif
 
@@ -123,15 +126,14 @@ public final class InteractiveProcess: @unchecked Sendable {
 
         // Drain stderr from the start: a child may complain before we read.
         let sink = stderrSink
-        stderrReader.readabilityHandler = { handle in
-            sink.append(handle.availableData)
-        }
+        stderrPump = PipePump(handle: stderrReader, onChunk: { sink.append($0) }, onEnd: {})
+        stderrPump.start()
 
         do {
             try proc.run()
             launched = true
         } catch {
-            stderrReader.readabilityHandler = nil
+            stderrPump.stop(waiting: true)
             tornDown = true   // nothing to reap; deinit must not wait on it
             throw ShellError.launchFailed(args: [executablePath] + arguments, underlying: error.localizedDescription)
         }
@@ -199,22 +201,20 @@ public final class InteractiveProcess: @unchecked Sendable {
         tornDown = true
         lock.unlock()
 
-        stderrReader.readabilityHandler = nil
+        stderrPump.stop(waiting: true)  // no read can race the close() below
         try? stdinWriter.close()
         if launched {
-            if process.isRunning {
+            if !process.hasExited {
                 process.terminate()                                   // SIGTERM
                 let grace = Date().addingTimeInterval(Self.terminationGrace)
-                while process.isRunning, Date() < grace {
+                while !process.hasExited, Date() < grace {
                     usleep(20_000)
                 }
-                if process.isRunning {
-                    #if canImport(Darwin)
-                    Darwin.kill(process.processIdentifier, SIGKILL)   // escalate
-                    #endif
+                if !process.hasExited {
+                    kill(process.processIdentifier, SIGKILL)          // escalate
                 }
             }
-            process.waitUntilExit()                                   // reap, always
+            _ = process.waitForExit()                                 // reap, always
         }
         try? stdoutReader.close()
         try? stderrReader.close()
