@@ -53,3 +53,7 @@ struct MockShell: ShellExecutorProtocol {
 | W1.1 | Actor mailbox starvation on `signal()` | `defer { Task.detached { semaphore.signal() } }` |
 | W1.2 | FD_CLOEXEC missing on pipe write-ends | `fcntl(fd, F_SETFD, FD_CLOEXEC)` on all 4 pipe FDs |
 | W1.3 | NSTask kqueue EVFILT_PROC race on fast children | `terminationHandler` set BEFORE `proc.run()` |
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
