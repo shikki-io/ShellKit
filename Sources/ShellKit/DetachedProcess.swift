@@ -75,7 +75,7 @@ public final class DetachedProcess: @unchecked Sendable {
         let executable = try Self.resolveExecutable(args)
         let sink = try Self.openSink(output, args: args)
 
-        let proc = Process()
+        let proc = Process()  // shi-doctor: process-bypass exempt — ShellKit is the subprocess primitive TimedShellExecutor is built on
         proc.executableURL = URL(fileURLWithPath: executable)
         proc.arguments = Array(args.dropFirst())
         proc.standardInput = FileHandle.nullDevice

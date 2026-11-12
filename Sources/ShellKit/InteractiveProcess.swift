@@ -208,7 +208,7 @@ public final class InteractiveProcess: @unchecked Sendable {
         }
         #endif
 
-        let proc = Process()
+        let proc = Process()  // shi-doctor: process-bypass exempt — ShellKit is the subprocess primitive TimedShellExecutor is built on
         proc.executableURL = URL(fileURLWithPath: executablePath)
         proc.arguments = arguments
         proc.standardInput = stdinPipe
