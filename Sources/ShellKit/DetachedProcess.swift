@@ -30,7 +30,8 @@ import Foundation
 /// Where a detached child's stdout and stderr go. Never a pipe: nobody is
 /// reading one, and a full pipe stops the child.
 public enum DetachedOutput: Sendable, Equatable {
-    /// `/dev/null` — the dispatcher only cares that the child started.
+    /// The platform's null device (`/dev/null`, `NUL` on Windows) — the
+    /// dispatcher only cares that the child started.
     case discard
     /// Appended to this file, created if absent. Both streams, one file, so
     /// the interleaving the operator reads matches what the child printed.
@@ -101,12 +102,14 @@ public final class DetachedProcess: @unchecked Sendable {
     // MARK: - Spawn inputs, one decision each
 
     /// An absolute `args[0]` is exec'd as given; a bare name is looked up on
-    /// `PATH` through ``ExecutableResolver``. Empty argv is a caller error.
+    /// `PATH` through ``ExecutableResolver``. What counts as absolute is the
+    /// platform's business (``PlatformPaths/isAbsolute(_:)``), not a `/` test.
+    /// Empty argv is a caller error.
     private static func resolveExecutable(_ args: [String]) throws -> String {
         guard let name = args.first, !name.isEmpty else {
             throw ShellError.launchFailed(args: args, underlying: "empty argv")
         }
-        if name.hasPrefix("/") { return name }
+        if PlatformPaths.isAbsolute(name) { return name }
         guard let found = ExecutableResolver.resolve(name) else {
             throw ShellError.launchFailed(args: args, underlying: "\(name) not found on PATH")
         }
@@ -154,7 +157,8 @@ public final class DetachedProcess: @unchecked Sendable {
         }
     }
 
-    /// SIGTERM, a grace period, then SIGKILL. Idempotent: a second call on an
+    /// SIGTERM, a grace period, then SIGKILL — ``Process/forceKill()`` names
+    /// what each platform spells differently. Idempotent: a second call on an
     /// exited child does nothing.
     public func terminate() {
         lock.lock()
@@ -165,10 +169,10 @@ public final class DetachedProcess: @unchecked Sendable {
         process.terminate()
         let deadline = Date().addingTimeInterval(Self.terminationGrace)
         while !process.hasExited, Date() < deadline {
-            usleep(50_000)
+            Thread.sleep(forTimeInterval: 0.05)
         }
         if !process.hasExited {
-            kill(process.processIdentifier, SIGKILL)
+            process.forceKill()
         }
     }
 }

@@ -3,7 +3,90 @@ import Foundation
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(WinSDK)
+import WinSDK
 #endif
+
+// MARK: - PlatformPaths
+
+/// The path spellings that differ between the platforms this package runs on,
+/// named once so no call site carries a literal.
+public enum PlatformPaths {
+    /// What separates one directory from the next inside a path.
+    public static var pathSeparator: Character {
+        #if os(Windows)
+        return "\\"
+        #else
+        return "/"
+        #endif
+    }
+
+    /// What separates one directory from the next inside `PATH`.
+    /// `:` everywhere but Windows, where a path can contain a colon (`C:`).
+    public static var searchPathSeparator: Character {
+        #if os(Windows)
+        return ";"
+        #else
+        return ":"
+        #endif
+    }
+
+    /// Whether `path` names a location on its own, needing no `PATH` lookup.
+    ///
+    /// POSIX: a leading `/`. Windows: a drive-qualified path (`C:\tools\x.exe`,
+    /// and `C:/tools/x.exe`, which every Windows API accepts) or a UNC share
+    /// (`\\host\share\x.exe`). A bare `\x.exe` is drive-relative, not absolute.
+    public static func isAbsolute(_ path: String) -> Bool {
+        #if os(Windows)
+        // STATUS: compiles by inspection, unproven on Windows (backlog afb8cd83)
+        if path.hasPrefix("\\\\") || path.hasPrefix("//") { return true }  // UNC
+        let chars = Array(path)
+        guard chars.count >= 3, chars[0].isLetter, chars[1] == ":" else { return false }
+        return chars[2] == "\\" || chars[2] == "/"
+        #else
+        return path.hasPrefix("/")
+        #endif
+    }
+
+    /// The process `PATH`.
+    ///
+    /// Windows environment names are case-insensitive and the block usually
+    /// spells this one `Path`, while `ProcessInfo.environment` is an ordinary
+    /// case-sensitive Swift dictionary — so a plain `environment["PATH"]`
+    /// subscript finds nothing there. This asks the way each platform answers.
+    public static func searchPath() -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        if let path = environment["PATH"] { return path }
+        #if os(Windows)
+        // STATUS: compiles by inspection, unproven on Windows (backlog afb8cd83)
+        return environment.first { $0.key.caseInsensitiveCompare("PATH") == .orderedSame }?.value
+        #else
+        return nil
+        #endif
+    }
+
+    /// The suffixes a bare name may acquire before it names a program.
+    ///
+    /// POSIX: none — an executable is executable by its mode bits. Windows:
+    /// the ones in `PATHEXT`, which is how `where.exe` and every shell find
+    /// `git` when the file on disk is `git.exe`. The empty string is first, so
+    /// a name given with its extension is still tried as written.
+    public static func executableSuffixes() -> [String] {
+        #if os(Windows)
+        // STATUS: compiles by inspection, unproven on Windows (backlog afb8cd83)
+        let environment = ProcessInfo.processInfo.environment
+        let pathext = environment.first { $0.key.caseInsensitiveCompare("PATHEXT") == .orderedSame }?.value
+            ?? ".COM;.EXE;.BAT;.CMD"
+        let suffixes = pathext
+            .split(separator: searchPathSeparator)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        return [""] + suffixes
+        #else
+        return [""]
+        #endif
+    }
+}
 
 // MARK: - ExecutableResolver
 
@@ -13,20 +96,30 @@ import Glibc
 public enum ExecutableResolver {
     /// - Parameters:
     ///   - name: an absolute path (returned as-is when executable) or a bare
-    ///     name looked up in `searchPath`.
-    ///   - searchPath: colon-separated directories; the process `PATH` by default.
+    ///     name looked up in `searchPath`. On Windows a bare name is also
+    ///     tried with each `PATHEXT` suffix, so `git` finds `git.exe`.
+    ///   - searchPath: the platform's `PATH`-style list — colon-separated on
+    ///     POSIX, semicolon-separated on Windows; the process `PATH` by default.
     /// - Returns: the absolute path, or nil when nothing executable matches.
     public static func resolve(
         _ name: String,
-        searchPath: String? = ProcessInfo.processInfo.environment["PATH"]
+        searchPath: String? = PlatformPaths.searchPath()
     ) -> String? {
         let fm = FileManager.default
-        if name.hasPrefix("/") {
-            return fm.isExecutableFile(atPath: name) ? name : nil
+        let suffixes = PlatformPaths.executableSuffixes()
+
+        if PlatformPaths.isAbsolute(name) {
+            return suffixes
+                .map { name + $0 }
+                .first { fm.isExecutableFile(atPath: $0) }
         }
-        for dir in (searchPath ?? "").split(separator: ":") where !dir.isEmpty {
-            let candidate = "\(dir)/\(name)"
-            if fm.isExecutableFile(atPath: candidate) { return candidate }
+
+        let separator = PlatformPaths.pathSeparator
+        for dir in (searchPath ?? "").split(separator: PlatformPaths.searchPathSeparator) where !dir.isEmpty {
+            for suffix in suffixes {
+                let candidate = "\(dir)\(separator)\(name)\(suffix)"
+                if fm.isExecutableFile(atPath: candidate) { return candidate }
+            }
         }
         return nil
     }
@@ -47,7 +140,9 @@ public enum ExecutableResolver {
 ///   can neither deadlock the exchange (64 KiB pipe) nor grow our memory;
 /// - every read has a deadline, polled, never a bare blocking `read(2)`;
 /// - teardown is one function: close stdin, SIGTERM, grace, SIGKILL, and
-///   `waitUntilExit` so no zombie is left behind, on every path.
+///   `waitUntilExit` so no zombie is left behind, on every path. On Windows
+///   there are no signals, so both steps are `TerminateProcess` — see
+///   ``Process/forceKill()``.
 public final class InteractiveProcess: @unchecked Sendable {
     /// How long SIGTERM gets before SIGKILL.
     public static let terminationGrace: TimeInterval = 2.0
@@ -66,6 +161,11 @@ public final class InteractiveProcess: @unchecked Sendable {
     /// launched blocks forever — the first version of this type hung the
     /// whole test bundle from `deinit` after a failed spawn.
     private var launched = false
+    #if os(Windows)
+    /// Built once: on Windows every `FileHandle.fileDescriptor` allocates a
+    /// fresh CRT descriptor over the same handle.
+    private let stdoutWindowsReader: WindowsPipeReader?
+    #endif
 
     /// The spawned child's pid.
     public var processIdentifier: Int32 { process.processIdentifier }
@@ -94,6 +194,10 @@ public final class InteractiveProcess: @unchecked Sendable {
         #if canImport(Darwin) || canImport(Glibc)
         // Same rule as TimedShellExecutor (W1.2): no pipe end leaks into the
         // next child we spawn, or a reader can wait on a stranger's copy.
+        //
+        // Windows needs no equivalent: handles are not inherited unless a
+        // spawn asks for them, and Foundation's `Process` passes the three it
+        // wires explicitly rather than handing over everything open.
         let pipeEnds = [
             stdinPipe.fileHandleForWriting, stdinPipe.fileHandleForReading,
             stdoutPipe.fileHandleForWriting, stdoutPipe.fileHandleForReading,
@@ -123,6 +227,9 @@ public final class InteractiveProcess: @unchecked Sendable {
         stdinWriter = stdinPipe.fileHandleForWriting
         stdoutReader = stdoutPipe.fileHandleForReading
         stderrReader = stderrPipe.fileHandleForReading
+        #if os(Windows)
+        stdoutWindowsReader = WindowsPipeReader(stdoutPipe.fileHandleForReading)
+        #endif
 
         // Drain stderr from the start: a child may complain before we read.
         let sink = stderrSink
@@ -165,6 +272,19 @@ public final class InteractiveProcess: @unchecked Sendable {
     /// that holds stdout open and never answers cannot wedge the caller.
     /// - Returns: the line, or nil on EOF or deadline.
     public func readLine(deadline: Date) -> Data? {
+        #if canImport(Darwin) || canImport(Glibc)
+        return readLinePOSIX(deadline: deadline)
+        #elseif os(Windows)
+        return readLineWindows(deadline: deadline)
+        #else
+        return nil
+        #endif
+    }
+
+    #if canImport(Darwin) || canImport(Glibc)
+    /// `poll` for readability, then one byte: a line reader must not consume
+    /// the byte after the newline, so it cannot read in blocks.
+    private func readLinePOSIX(deadline: Date) -> Data? {
         var line = Data()
         let fd = stdoutReader.fileDescriptor
         while true {
@@ -185,6 +305,34 @@ public final class InteractiveProcess: @unchecked Sendable {
         }
         return line.isEmpty ? nil : line
     }
+    #endif
+
+    #if os(Windows)
+    /// STATUS: compiles by inspection, unproven on Windows (backlog afb8cd83)
+    ///
+    /// Same byte-at-a-time shape as the POSIX path, for the same reason. What
+    /// differs is the wait: Windows cannot block on a pipe until it is
+    /// readable, so a peek that finds nothing sleeps a slice instead, bounded
+    /// by whatever is left of the caller's deadline.
+    private func readLineWindows(deadline: Date) -> Data? {
+        guard let reader = stdoutWindowsReader else { return nil }
+        var line = Data()
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 { return nil }
+
+            let (byte, endOfFile) = reader.readByte()
+            guard let byte else {
+                if endOfFile { break }                                  // EOF
+                Thread.sleep(forTimeInterval: min(remaining, 0.005))
+                continue
+            }
+            if byte == 0x0A { break }  // newline
+            line.append(byte)
+        }
+        return line.isEmpty ? nil : line
+    }
+    #endif
 
     /// Same as ``readLine(deadline:)``, decoded as UTF-8.
     public func readLineString(deadline: Date) -> String? {
@@ -193,8 +341,8 @@ public final class InteractiveProcess: @unchecked Sendable {
 
     // MARK: Teardown
 
-    /// Close stdin, SIGTERM, wait ``terminationGrace``, SIGKILL if still
-    /// alive, and reap. Idempotent; safe on every exit path.
+    /// Close stdin, ask the child to stop, wait ``terminationGrace``, kill it
+    /// if still alive, and reap. Idempotent; safe on every exit path.
     public func terminate() {
         lock.lock()
         if tornDown { lock.unlock(); return }
@@ -205,13 +353,13 @@ public final class InteractiveProcess: @unchecked Sendable {
         try? stdinWriter.close()
         if launched {
             if !process.hasExited {
-                process.terminate()                                   // SIGTERM
+                process.terminate()                                   // SIGTERM (POSIX)
                 let grace = Date().addingTimeInterval(Self.terminationGrace)
                 while !process.hasExited, Date() < grace {
-                    usleep(20_000)
+                    Thread.sleep(forTimeInterval: 0.02)
                 }
                 if !process.hasExited {
-                    kill(process.processIdentifier, SIGKILL)          // escalate
+                    process.forceKill()                               // escalate
                 }
             }
             _ = process.waitForExit()                                 // reap, always
