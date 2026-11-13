@@ -3,9 +3,19 @@
 Releases before 0.6.0 were tagged without a changelog; `git log v0.5.0..v0.5.1`
 and the tags themselves are the record for those.
 
-## 0.6.0 — unreleased
+## 0.6.0 — 2026-11-13
 
 Additive. No existing public API changed, so no consumer needs a source change.
+
+### Fixed
+
+- `DetachedProcess.exitCode()` could hang forever on macOS. It waited with
+  `Process.waitUntilExit()` on a GCD worker thread; that call spins the current
+  run loop, which a GCD worker does not have. `waitForExit()` now polls
+  `isRunning` on Darwin and Windows, as it already polled on Linux. Measured
+  before the fix: the `DetachedProcessTests` run sat at 0% CPU for 10 minutes
+  and, in another run, 9 h 40 min after the child had exited. After: three
+  consecutive runs, 47/47 each.
 
 ### Added
 
