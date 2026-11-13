@@ -3,6 +3,8 @@ import Foundation
     import Darwin
 #elseif canImport(Glibc)
     import Glibc
+#elseif canImport(WinSDK)
+    import WinSDK
 #endif
 
 // MARK: - TimedShellExecutor
@@ -195,12 +197,59 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         public let arguments: [String]
     }
 
-    /// Pure and tested: absolute `args[0]` → direct exec; otherwise `/usr/bin/env`.
+    /// Pure and tested: absolute `args[0]` → direct exec; otherwise, on POSIX,
+    /// `/usr/bin/env`.
+    ///
+    /// Windows has no `env` to delegate the lookup to, so the lookup happens
+    /// here, through ``ExecutableResolver`` (which also tries the `PATHEXT`
+    /// suffixes, so `git` reaches `git.exe`). An unresolvable name is passed
+    /// through unchanged rather than guessed at: `Process.run()` then fails
+    /// with the launch error the caller needs to read, and this function stays
+    /// what its callers rely on — pure, and never a thrower.
     public static func launchPlan(for args: [String]) -> LaunchPlan {
-        guard let first = args.first, first.hasPrefix("/") else {
+        guard let first = args.first, PlatformPaths.isAbsolute(first) else {
+            #if os(Windows)
+            // STATUS: compiles by inspection, unproven on Windows (backlog afb8cd83)
+            guard let first = args.first, !first.isEmpty else {
+                return LaunchPlan(executable: "", arguments: args)
+            }
+            let executable = ExecutableResolver.resolve(first) ?? first
+            return LaunchPlan(executable: executable, arguments: Array(args.dropFirst()))
+            #else
             return LaunchPlan(executable: "/usr/bin/env", arguments: args)
+            #endif
         }
         return LaunchPlan(executable: first, arguments: Array(args.dropFirst()))
+    }
+
+    /// The child, configured but not launched: the launch plan, the working
+    /// directory and the environment. Extracted from ``spawnAndWait`` so that
+    /// function's branch count stays inside the project's lint budget — the
+    /// Windows arm of ``launchPlan(for:)`` pushed it one over.
+    private static func makeProcess(
+        args: [String],
+        cwd: String?,
+        env: [String: String]?
+    ) -> Process {
+        let proc = Process()
+        let plan = launchPlan(for: args)
+        proc.executableURL = URL(fileURLWithPath: plan.executable)
+        proc.arguments = plan.arguments
+
+        if let cwd {
+            proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        }
+
+        // A non-nil `environment` REPLACES the parent's, so extras are merged
+        // over a copy of it rather than assigned on their own.
+        if let extraEnv = env, !extraEnv.isEmpty {
+            var merged = ProcessInfo.processInfo.environment
+            for (key, value) in extraEnv {
+                merged[key] = value
+            }
+            proc.environment = merged
+        }
+        return proc
     }
 
     private static func spawnAndWait(
@@ -214,23 +263,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
     ) async throws -> ShellCommandResult {
         let start = Date()
 
-        // Build the process.
-        let proc = Process()
-        let plan = launchPlan(for: args)
-        proc.executableURL = URL(fileURLWithPath: plan.executable)
-        proc.arguments = plan.arguments
-
-        if let cwd = cwd {
-            proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        }
-
-        if let extraEnv = env, !extraEnv.isEmpty {
-            var merged = ProcessInfo.processInfo.environment
-            for (k, v) in extraEnv {
-                merged[k] = v
-            }
-            proc.environment = merged
-        }
+        let proc = makeProcess(args: args, cwd: cwd, env: env)
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -278,6 +311,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
                 defer { lock.unlock() }
                 return resumed
             }
+
             func tryResume(_ body: () -> Void) {
                 lock.lock()
                 defer { lock.unlock() }
@@ -328,7 +362,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
                 proc.terminate() // SIGTERM
                 try? await Task.sleep(nanoseconds: UInt64(Self.sigtermGracePeriod * 1_000_000_000))
                 if proc.isRunning {
-                    kill(proc.processIdentifier, SIGKILL)
+                    proc.forceKill()
                 }
             }
         }
