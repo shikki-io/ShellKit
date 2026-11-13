@@ -51,8 +51,16 @@ extension Process {
     }
 
     /// Block until the child has exited and return its status.
-    /// Darwin and Windows: `waitUntilExit()`. Linux: polls the kernel as well,
-    /// because `waitUntilExit()` inherits the Foundation lag described above.
+    /// Linux: polls the kernel as well, because `waitUntilExit()` inherits the
+    /// Foundation lag described above. Darwin and Windows: polls `isRunning`.
+    ///
+    /// Not `waitUntilExit()` on Darwin: it spins the CURRENT run loop, and
+    /// `DetachedProcess.exitCode()` calls this from a GCD worker thread, which
+    /// has none. Measured 2026-11-13 (ShellKit W31 gate, two runs): the
+    /// `DetachedProcessTests` xctest sat at 0% CPU in
+    /// `exitCode() -> waitForExit() -> waitUntilExit()` for 10 minutes and for
+    /// 9 h 40 min, long after the child had exited. Polling `isRunning` needs no
+    /// run loop: Foundation's reaper flips it from its own dispatch source.
     func waitForExit() -> Int32 {
         #if canImport(Glibc)
         while true {
@@ -68,7 +76,7 @@ extension Process {
             Thread.sleep(forTimeInterval: 0.01)
         }
         #else
-        waitUntilExit()
+        while isRunning { Thread.sleep(forTimeInterval: 0.01) }
         return terminationStatus
         #endif
     }
