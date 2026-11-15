@@ -361,29 +361,31 @@ public final class InteractiveProcess: @unchecked Sendable {
 
     /// Close stdin, ask the child to stop, wait ``terminationGrace``, kill it
     /// if still alive, and reap. Idempotent; safe on every exit path.
-    public func terminate() {
+    /// - Returns: what actually happened to the child — `.alreadyExited`,
+    ///   `.graceful` or `.hardTerminated`. Discardable, so existing callers keep
+    ///   compiling (operator decision D4, 2026-11-15).
+    @discardableResult
+    public func terminate() -> ProcessStopOutcome {
         lock.lock()
-        if tornDown { lock.unlock(); return }
+        if tornDown { lock.unlock(); return .alreadyExited }
         tornDown = true
         lock.unlock()
 
         stderrPump.stop(waiting: true)  // no read can race the close() below
         try? stdinWriter.close()
+        var outcome = ProcessStopOutcome.alreadyExited
         if launched {
-            if !process.hasExited {
-                process.terminate()                                   // SIGTERM (POSIX)
-                let grace = Date().addingTimeInterval(Self.terminationGrace)
-                while !process.hasExited, Date() < grace {
-                    Thread.sleep(forTimeInterval: 0.02)
-                }
-                if !process.hasExited {
-                    process.forceKill()                               // escalate
-                }
-            }
+            // One shared implementation for all three subprocess shapes
+            // (operator decision D4): graceful request, grace period, escalate,
+            // and report which of those actually happened. Hand-rolling the
+            // ladder here is how this very method came to wrap its escalation in
+            // `#if canImport(Darwin)` while TimedShellExecutor's did not.
+            outcome = stopProcess(process, grace: Self.terminationGrace, poll: 0.02)
             _ = process.waitForExit()                                 // reap, always
         }
         try? stdoutReader.close()
         try? stderrReader.close()
+        return outcome
     }
 
     private var isTornDown: Bool {

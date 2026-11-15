@@ -365,13 +365,16 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
             // SIGKILL causes NSTask to invoke terminationHandler, which resumes
             // the continuation — no explicit continuation.resume() needed here.
             timeoutFlag.fired = true
-            if proc.isRunning {
-                proc.terminate() // SIGTERM
-                try? await Task.sleep(nanoseconds: UInt64(Self.sigtermGracePeriod * 1_000_000_000))
-                if proc.isRunning {
-                    proc.forceKill()
-                }
-            }
+            // The async ladder (operator decision D4): graceful request, grace
+            // period, escalate — and it reports which happened. `Thread.sleep`
+            // here would park a cooperative thread, so this is the `await`
+            // variant, not the synchronous one wrapped in a Task.
+            //
+            // The outcome is not surfaced to `run`'s caller yet: a timeout is
+            // already reported as `ShellError.timeout`, and widening that error
+            // to carry the stop outcome is a public API change that belongs with
+            // the consumer that needs it, not with this fix.
+            _ = await stopProcessAsync(proc, grace: Self.sigtermGracePeriod)
         }
 
         // The continuation yields the exit status when the kernel reported it

@@ -121,6 +121,12 @@ extension Process {
         #elseif os(Windows)
         // STATUS: compiles by inspection, unproven on Windows (backlog afb8cd83)
         //
+        // This is the HARD half only. Operator decision D4 (2026-11-15) puts the
+        // CTRL_BREAK attempt at the graceful step — `requestGracefulStop` in
+        // Platform/ProcessStop.swift — precisely so that reaching this function
+        // always means "hard-terminated" on every OS, and the result type can
+        // say so without inspecting which platform it ran on.
+        //
         // `Process.processIdentifier` is the pid; the HANDLE Foundation holds
         // is private, so the pid is re-opened for the one right we need.
         guard let handle = OpenProcess(DWORD(PROCESS_TERMINATE), false, DWORD(processIdentifier)) else {

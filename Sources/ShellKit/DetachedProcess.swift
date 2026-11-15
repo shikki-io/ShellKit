@@ -160,19 +160,19 @@ public final class DetachedProcess: @unchecked Sendable {
     /// SIGTERM, a grace period, then SIGKILL — ``Process/forceKill()`` names
     /// what each platform spells differently. Idempotent: a second call on an
     /// exited child does nothing.
-    public func terminate() {
+    /// - Returns: what actually happened — `.alreadyExited`, `.graceful`, or
+    ///   `.hardTerminated`. Discardable, so every existing caller keeps
+    ///   compiling, but a caller that cares whether the child ran its cleanup
+    ///   can now ask instead of assuming (operator decision D4, 2026-11-15).
+    @discardableResult
+    public func terminate() -> ProcessStopOutcome {
         lock.lock()
         defer { lock.unlock() }
-        guard !reaped else { return }
+        // A second call reports the truth about the child rather than the truth
+        // about this method: it has exited, so `.alreadyExited`, not a repeat of
+        // whatever the first call did.
+        guard !reaped else { return .alreadyExited }
         reaped = true
-        guard !process.hasExited else { return }
-        process.terminate()
-        let deadline = Date().addingTimeInterval(Self.terminationGrace)
-        while !process.hasExited, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        if !process.hasExited {
-            process.forceKill()
-        }
+        return stopProcess(process, grace: Self.terminationGrace)
     }
 }
