@@ -55,6 +55,13 @@ final class InteractiveProcessTests: XCTestCase {
         defer { child.terminate() }
 
         XCTAssertEqual(child.readLineString(deadline: Date().addingTimeInterval(10)), "done")
+        // The sink fills from a dispatch callback, so it can trail the stdout
+        // line by a few ms: nothing forces the callback to have run before
+        // "done" is readable.
+        let settle = Date().addingTimeInterval(5)
+        while child.stderrText.utf8.count < InteractiveProcess.stderrCapacity, Date() < settle {
+            usleep(10_000)
+        }
         XCTAssertLessThanOrEqual(child.stderrText.utf8.count, InteractiveProcess.stderrCapacity)
         XCTAssertTrue(child.stderrText.hasPrefix("eeee"))
     }
@@ -62,13 +69,21 @@ final class InteractiveProcessTests: XCTestCase {
     // MARK: - 5. Teardown kills a child that ignores SIGTERM, and reaps it
 
     func testTerminateEscalatesToSigkillAndReaps() throws {
-        let child = try InteractiveProcess(executablePath: "/bin/sh", arguments: ["-c", "trap '' TERM; sleep 60"])
+        // `exec`: the sleep IS the child (and keeps SIGTERM ignored), so no
+        // wrapper shell can outlive it and delay Foundation's reap on Linux.
+        let child = try InteractiveProcess(executablePath: "/bin/sh", arguments: ["-c", "trap '' TERM; echo ready; exec sleep 60"])
         let pid = child.processIdentifier
+        // Wait for the trap to be installed: without it SIGTERM could win the
+        // race and this test would pass without ever exercising the SIGKILL.
+        XCTAssertEqual(child.readLineString(deadline: Date().addingTimeInterval(5)), "ready")
         XCTAssertTrue(child.isRunning)
 
         let start = Date()
         child.terminate()
         XCTAssertFalse(child.isRunning)
+        XCTAssertGreaterThanOrEqual(
+            Date().timeIntervalSince(start), InteractiveProcess.terminationGrace - 0.1,
+            "SIGTERM is ignored: only the SIGKILL escalation after the grace can have ended it")
         XCTAssertLessThan(Date().timeIntervalSince(start), InteractiveProcess.terminationGrace + 2)
         // Reaped: kill(pid, 0) on a reaped pid fails with ESRCH.
         XCTAssertEqual(kill(pid, 0), -1)

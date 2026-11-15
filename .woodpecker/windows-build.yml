@@ -1,0 +1,45 @@
+# .woodpecker/windows-build.yml — the pipeline that would prove ShellKit on Windows.
+#
+# DORMANT ON PURPOSE. As of 2026-11-12 no agent labelled `platform: windows/amd64`
+# is registered, so this pipeline has never run and ShellKit's Windows branches
+# have never been compiled by a Windows toolchain. They are marked
+# `// STATUS: compiles by inspection, unproven on Windows` in the sources and
+# tracked as backlog afb8cd83. Nothing in the README or the CHANGELOG claims
+# Windows support, and nothing should until this pipeline is green.
+#
+# The label below is what keeps it dormant rather than red: with no matching
+# agent the pipeline stays pending instead of running on a Linux or macOS agent
+# and failing for the wrong reason. Registering such an agent is the whole of
+# what this file is waiting for.
+
+when:
+  event: [pull_request, push, manual]  # manual = the "run pipeline" button
+  branch: [main, develop, "epic/*", "feat/*", "fix/*", "agent/*", "story/*"]
+
+# A Windows gate must run on a Windows agent. Without a platform label, any
+# connected agent is eligible, whatever its OS or backend.
+labels:
+  platform: windows/amd64
+
+# No `image:` — this targets an agent on the LOCAL backend with a Swift
+# toolchain for Windows on PATH. That is deliberate: the Swift project does
+# publish Windows container images, but naming a tag here that nobody has
+# pulled would be a guess, and a wrong tag fails as "image not found" long
+# before it tells us anything about this package. Whoever registers the agent
+# chooses: keep the local backend, or add the `image:` their registry actually
+# carries.
+steps:
+  windows-build:
+    commands:
+      - swift --version
+      - swift build
+
+  # The suite matters more here than anywhere else. Every Windows branch in this
+  # package is in a child-process path — pipe reads, EOF detection, forced
+  # termination — so compiling proves close to nothing on its own.
+  #
+  # Direct SwiftPM on purpose, same reason as the Linux gate: the macOS test
+  # runner the package uses locally (kagami) does not run here.
+  windows-test:
+    commands:
+      - swift test

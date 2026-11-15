@@ -30,7 +30,8 @@ import Foundation
 /// Where a detached child's stdout and stderr go. Never a pipe: nobody is
 /// reading one, and a full pipe stops the child.
 public enum DetachedOutput: Sendable, Equatable {
-    /// `/dev/null` — the dispatcher only cares that the child started.
+    /// The platform's null device (`/dev/null`, `NUL` on Windows) — the
+    /// dispatcher only cares that the child started.
     case discard
     /// Appended to this file, created if absent. Both streams, one file, so
     /// the interleaving the operator reads matches what the child printed.
@@ -50,7 +51,7 @@ public final class DetachedProcess: @unchecked Sendable {
     public var processIdentifier: Int32 { process.processIdentifier }
 
     /// Whether the child is still running.
-    public var isRunning: Bool { process.isRunning }
+    public var isRunning: Bool { !process.hasExited }
 
     /// Spawn `args` and return without waiting.
     ///
@@ -74,7 +75,7 @@ public final class DetachedProcess: @unchecked Sendable {
         let executable = try Self.resolveExecutable(args)
         let sink = try Self.openSink(output, args: args)
 
-        let proc = Process()
+        let proc = Process()  // shi-doctor: process-bypass exempt — ShellKit is the subprocess primitive TimedShellExecutor is built on
         proc.executableURL = URL(fileURLWithPath: executable)
         proc.arguments = Array(args.dropFirst())
         proc.standardInput = FileHandle.nullDevice
@@ -101,12 +102,14 @@ public final class DetachedProcess: @unchecked Sendable {
     // MARK: - Spawn inputs, one decision each
 
     /// An absolute `args[0]` is exec'd as given; a bare name is looked up on
-    /// `PATH` through ``ExecutableResolver``. Empty argv is a caller error.
+    /// `PATH` through ``ExecutableResolver``. What counts as absolute is the
+    /// platform's business (``PlatformPaths/isAbsolute(_:)``), not a `/` test.
+    /// Empty argv is a caller error.
     private static func resolveExecutable(_ args: [String]) throws -> String {
         guard let name = args.first, !name.isEmpty else {
             throw ShellError.launchFailed(args: args, underlying: "empty argv")
         }
-        if name.hasPrefix("/") { return name }
+        if PlatformPaths.isAbsolute(name) { return name }
         guard let found = ExecutableResolver.resolve(name) else {
             throw ShellError.launchFailed(args: args, underlying: "\(name) not found on PATH")
         }
@@ -146,30 +149,30 @@ public final class DetachedProcess: @unchecked Sendable {
     /// The child's exit code, awaited without blocking a cooperative thread.
     /// Returns immediately once the child has already exited.
     public func exitCode() async -> Int32 {
-        if !process.isRunning { return process.terminationStatus }
+        if let status = process.exitStatusIfExited { return status }
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async { [process] in
-                process.waitUntilExit()
-                continuation.resume(returning: process.terminationStatus)
+                continuation.resume(returning: process.waitForExit())
             }
         }
     }
 
-    /// SIGTERM, a grace period, then SIGKILL. Idempotent: a second call on an
+    /// SIGTERM, a grace period, then SIGKILL — ``Process/forceKill()`` names
+    /// what each platform spells differently. Idempotent: a second call on an
     /// exited child does nothing.
     public func terminate() {
         lock.lock()
         defer { lock.unlock() }
         guard !reaped else { return }
         reaped = true
-        guard process.isRunning else { return }
+        guard !process.hasExited else { return }
         process.terminate()
         let deadline = Date().addingTimeInterval(Self.terminationGrace)
-        while process.isRunning, Date() < deadline {
-            usleep(50_000)
+        while !process.hasExited, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
         }
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
+        if !process.hasExited {
+            process.forceKill()
         }
     }
 }
