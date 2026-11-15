@@ -3,6 +3,8 @@ import Foundation
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #elseif canImport(WinSDK)
 import WinSDK
 #endif
@@ -174,6 +176,22 @@ public final class InteractiveProcess: @unchecked Sendable {
     /// Everything the child wrote to stderr so far (bounded), trimmed.
     public var stderrText: String { stderrSink.text() }
 
+    /// The descriptors this process owns, for asserting their flags.
+    ///
+    /// Internal rather than public: no consumer needs it, and it is named for
+    /// what it returns rather than for the test that reads it — a
+    /// `…ForTesting` accessor would make the test the API's reason to exist.
+    /// `LinuxHangRegressionTests` reads it to check `FD_CLOEXEC` on the LIVE
+    /// descriptors, which is the only way to prove the product sets the flag
+    /// rather than that a helper could set it.
+    var pipeDescriptors: [(name: String, fd: Int32)] {
+        [
+            ("stdin write", stdinWriter.fileDescriptor),
+            ("stdout read", stdoutReader.fileDescriptor),
+            ("stderr read", stderrReader.fileDescriptor),
+        ]
+    }
+
     /// Spawn `executablePath` with pipes on all three streams.
     ///
     /// - Parameters:
@@ -191,7 +209,7 @@ public final class InteractiveProcess: @unchecked Sendable {
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        #if canImport(Darwin) || canImport(Glibc)
+        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
         // Same rule as TimedShellExecutor (W1.2): no pipe end leaks into the
         // next child we spawn, or a reader can wait on a stranger's copy.
         //
@@ -272,7 +290,7 @@ public final class InteractiveProcess: @unchecked Sendable {
     /// that holds stdout open and never answers cannot wedge the caller.
     /// - Returns: the line, or nil on EOF or deadline.
     public func readLine(deadline: Date) -> Data? {
-        #if canImport(Darwin) || canImport(Glibc)
+        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
         return readLinePOSIX(deadline: deadline)
         #elseif os(Windows)
         return readLineWindows(deadline: deadline)
@@ -281,7 +299,7 @@ public final class InteractiveProcess: @unchecked Sendable {
         #endif
     }
 
-    #if canImport(Darwin) || canImport(Glibc)
+    #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
     /// `poll` for readability, then one byte: a line reader must not consume
     /// the byte after the newline, so it cannot read in blocks.
     private func readLinePOSIX(deadline: Date) -> Data? {

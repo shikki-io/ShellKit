@@ -3,6 +3,8 @@ import Foundation
     import Darwin
 #elseif canImport(Glibc)
     import Glibc
+#elseif canImport(Musl)
+    import Musl
 #elseif canImport(WinSDK)
     import WinSDK
 #endif
@@ -274,12 +276,17 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         // for all N..N+78 children to close their inherited copy of the write-end.
         // macOS Pipe() does NOT set O_CLOEXEC by default; this is the root cause
         // that defeated PRs #585 → #596 → #657 → #714 → #719.
-        #if canImport(Darwin) || canImport(Glibc)
-            _ = fcntl(stdoutPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            _ = fcntl(stderrPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            _ = fcntl(stdoutPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            _ = fcntl(stderrPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
-        #endif
+        // Unconditional: `setCloseOnExec` lives in Platform/ and covers Darwin,
+        // Glibc AND Musl. This block was gated on `canImport(Darwin) ||
+        // canImport(Glibc)`, which is FALSE on the static musl triple that
+        // `shi ship --platform linux` produces (decision 7701c618) — so the
+        // cascade this comment describes was still live there, on the one Linux
+        // flavour we actually ship. v0.6.0 contains zero `canImport(Musl)`, and
+        // its Linux gate is native glibc (`swift:6.3-jammy`), which cannot see it.
+        setCloseOnExec(stdoutPipe.fileHandleForWriting.fileDescriptor)
+        setCloseOnExec(stderrPipe.fileHandleForWriting.fileDescriptor)
+        setCloseOnExec(stdoutPipe.fileHandleForReading.fileDescriptor)
+        setCloseOnExec(stderrPipe.fileHandleForReading.fileDescriptor)
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
@@ -387,7 +394,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
                     }
                     return
                 }
-                #if canImport(Glibc)
+                #if canImport(Glibc) || canImport(Musl)
                 Task.detached {
                     while !guard_.isResumed {
                         if let status = proc.kernelReportedExitStatus {

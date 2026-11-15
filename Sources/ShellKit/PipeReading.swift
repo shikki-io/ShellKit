@@ -3,6 +3,8 @@ import Foundation
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #elseif canImport(WinSDK)
 import WinSDK
 #endif
@@ -28,7 +30,7 @@ extension FileHandle {
     ///   data. The rest of the loop never waits.
     /// - Returns: `data` is whatever arrived; `endOfFile` is true once the
     ///   write-end is closed and the pipe is empty.
-    #if canImport(Glibc)
+    #if canImport(Glibc) || canImport(Musl)
     func readAvailable(waitingMilliseconds: Int32 = 0) -> (data: Data, endOfFile: Bool) {
         var collected = Data()
         let fd = fileDescriptor
@@ -163,7 +165,7 @@ final class PipePump {
     private let handle: FileHandle
     private let onChunk: @Sendable (Data) -> Void
     private let onEnd: @Sendable () -> Void
-    #if canImport(Glibc) || os(Windows)
+    #if canImport(Glibc) || canImport(Musl) || os(Windows)
     private let thread: Thread
     private let exited = DispatchSemaphore(value: 0)
     #endif
@@ -176,7 +178,7 @@ final class PipePump {
         self.handle = handle
         self.onChunk = onChunk
         self.onEnd = onEnd
-        #if canImport(Glibc)
+        #if canImport(Glibc) || canImport(Musl)
         let exited = self.exited
         self.thread = Thread {
             while !Thread.current.isCancelled {
@@ -216,7 +218,7 @@ final class PipePump {
     }
 
     func start() {
-        #if canImport(Glibc) || os(Windows)
+        #if canImport(Glibc) || canImport(Musl) || os(Windows)
         thread.start()
         #else
         let onChunk = self.onChunk
@@ -236,7 +238,7 @@ final class PipePump {
     /// happen on the descriptor, so the caller may close it (bounded: 2 s).
     /// Safe to call from `onEnd`/`onChunk` themselves; it never waits for itself.
     func stop(waiting: Bool) {
-        #if canImport(Glibc) || os(Windows)
+        #if canImport(Glibc) || canImport(Musl) || os(Windows)
         thread.cancel()
         if waiting, Thread.current !== thread {
             _ = exited.wait(timeout: .now() + 2)

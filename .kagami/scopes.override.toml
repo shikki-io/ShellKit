@@ -52,3 +52,19 @@ test_file_patterns = ["**/ShellKitTests/RunStreamingTests.swift"]
 expected_test_min = 8
 timeout_seconds = 600
 description = "ShellKit — TimedShellExecutor.runStreaming: live chunks, independent stderr, timeout kill, protocol fallback. Run: kagami test --scope ShellKitStreaming --strict"
+
+[[scopes]]
+# Spec c8fa126c W5. The portability ratchet plus the Linux hang regressions.
+# Registered here rather than left to auto-discovery because its value is that it
+# runs on EVERY delivered head: the two defects it pins (an Apple-capability
+# condition outside Platform/, and a POSIX gate that omits musl) are invisible to
+# both a macOS test run and a musl cross build.
+name = "ShellKitPortability"
+package_path = "."
+source_paths = ["Tests/ShellKitTests/Portability/"]
+test_command = ["swift", "test", "--filter", "ShellKitPortabilityRatchetTests|LinuxHangRegressionTests"]
+test_target_name = "ShellKitTests"
+test_file_patterns = ["**/ShellKitPortabilityRatchetTests.swift", "**/LinuxHangRegressionTests.swift"]
+type_patterns = ["ShellKitPortabilityRatchetTests", "LinuxHangRegressionTests"]
+expected_test_min = 10
+timeout_seconds = 180

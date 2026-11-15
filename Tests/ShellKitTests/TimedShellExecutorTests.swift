@@ -1,9 +1,17 @@
 import XCTest
 @testable import ShellKit
+
+// The existence probe below calls `kill(pid, 0)` and reads `errno`/`ESRCH`, so
+// this file needs a libc. All THREE arms, not two: the chain said Darwin/Glibc
+// until 2026-11-15, which is nothing on the static musl triple the fleet ships —
+// and the musl cross gate builds the library only, so it could never report a
+// test target that fails to compile. Caught by this suite's own rule 2.
 #if canImport(Darwin)
     import Darwin
 #elseif canImport(Glibc)
     import Glibc
+#elseif canImport(Musl)
+    import Musl
 #endif
 
 // MARK: - TimedShellExecutorTests
