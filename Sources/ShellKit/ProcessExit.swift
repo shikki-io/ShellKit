@@ -3,6 +3,8 @@ import Foundation
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #elseif canImport(WinSDK)
 import WinSDK
 #endif
@@ -25,13 +27,18 @@ extension Process {
     /// The probe is `waitid(WNOWAIT)`: it observes the zombie without reaping
     /// it, so Foundation still reaps and reports it whenever it gets there.
     var kernelReportedExitStatus: Int32? {
-        #if canImport(Glibc)
+        #if canImport(Glibc) || canImport(Musl)
         guard isRunning else { return nil }  // Foundation already reaped it; the pid may be reused
         var info = siginfo_t()
-        guard waitid(P_PID, id_t(processIdentifier), &info, WEXITED | WNOHANG | WNOWAIT) == 0,
-              info._sifields._sigchld.si_pid != 0
-        else { return nil }
-        return info._sifields._sigchld.si_status
+        guard waitid(P_PID, id_t(processIdentifier), &info, WEXITED | WNOHANG | WNOWAIT) == 0 else {
+            return nil
+        }
+        // Through Platform/: glibc and musl disagree on siginfo_t's LAYOUT, not
+        // just on whether it exists. `info._sifields._sigchld.si_pid` does not
+        // compile for musl, where the same datum is reached via
+        // `__si_fields.__si_common.__first.__piduid.si_pid` — `si_pid` is a C
+        // macro there and Swift cannot see it. One accessor, three spellings.
+        return siginfoChildExit(info)?.status
         #else
         return nil
         #endif
@@ -62,7 +69,7 @@ extension Process {
     /// 9 h 40 min, long after the child had exited. Polling `isRunning` needs no
     /// run loop: Foundation's reaper flips it from its own dispatch source.
     func waitForExit() -> Int32 {
-        #if canImport(Glibc)
+        #if canImport(Glibc) || canImport(Musl)
         while true {
             if !isRunning { return terminationStatus }
             if let status = kernelReportedExitStatus {
@@ -104,10 +111,21 @@ extension Process {
     /// On POSIX the same is true of a grandchild in its own process group.
     /// Tracked as backlog afb8cd83.
     func forceKill() {
-        #if canImport(Darwin) || canImport(Glibc)
-        kill(processIdentifier, SIGKILL)
+        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
+        // Through Platform/: `hardKill` names SIGKILL in exactly one place and
+        // is the seam operator decision D4 (2026-11-15) puts the Windows
+        // CTRL_BREAK/TerminateProcess choice behind. The gate keeps the Musl arm
+        // so the static triple escalates at all — without it this whole function
+        // compiled to nothing there.
+        hardKill(processIdentifier)
         #elseif os(Windows)
         // STATUS: compiles by inspection, unproven on Windows (backlog afb8cd83)
+        //
+        // This is the HARD half only. Operator decision D4 (2026-11-15) puts the
+        // CTRL_BREAK attempt at the graceful step — `requestGracefulStop` in
+        // Platform/ProcessStop.swift — precisely so that reaching this function
+        // always means "hard-terminated" on every OS, and the result type can
+        // say so without inspecting which platform it ran on.
         //
         // `Process.processIdentifier` is the pid; the HANDLE Foundation holds
         // is private, so the pid is re-opened for the one right we need.

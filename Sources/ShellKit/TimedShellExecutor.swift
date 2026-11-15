@@ -3,6 +3,8 @@ import Foundation
     import Darwin
 #elseif canImport(Glibc)
     import Glibc
+#elseif canImport(Musl)
+    import Musl
 #elseif canImport(WinSDK)
     import WinSDK
 #endif
@@ -274,12 +276,17 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         // for all N..N+78 children to close their inherited copy of the write-end.
         // macOS Pipe() does NOT set O_CLOEXEC by default; this is the root cause
         // that defeated PRs #585 → #596 → #657 → #714 → #719.
-        #if canImport(Darwin) || canImport(Glibc)
-            _ = fcntl(stdoutPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            _ = fcntl(stderrPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            _ = fcntl(stdoutPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            _ = fcntl(stderrPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
-        #endif
+        // Unconditional: `setCloseOnExec` lives in Platform/ and covers Darwin,
+        // Glibc AND Musl. This block was gated on `canImport(Darwin) ||
+        // canImport(Glibc)`, which is FALSE on the static musl triple that
+        // `shi ship --platform linux` produces (decision 7701c618) — so the
+        // cascade this comment describes was still live there, on the one Linux
+        // flavour we actually ship. v0.6.0 contains zero `canImport(Musl)`, and
+        // its Linux gate is native glibc (`swift:6.3-jammy`), which cannot see it.
+        setCloseOnExec(stdoutPipe.fileHandleForWriting.fileDescriptor)
+        setCloseOnExec(stderrPipe.fileHandleForWriting.fileDescriptor)
+        setCloseOnExec(stdoutPipe.fileHandleForReading.fileDescriptor)
+        setCloseOnExec(stderrPipe.fileHandleForReading.fileDescriptor)
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
@@ -358,13 +365,16 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
             // SIGKILL causes NSTask to invoke terminationHandler, which resumes
             // the continuation — no explicit continuation.resume() needed here.
             timeoutFlag.fired = true
-            if proc.isRunning {
-                proc.terminate() // SIGTERM
-                try? await Task.sleep(nanoseconds: UInt64(Self.sigtermGracePeriod * 1_000_000_000))
-                if proc.isRunning {
-                    proc.forceKill()
-                }
-            }
+            // The async ladder (operator decision D4): graceful request, grace
+            // period, escalate — and it reports which happened. `Thread.sleep`
+            // here would park a cooperative thread, so this is the `await`
+            // variant, not the synchronous one wrapped in a Task.
+            //
+            // The outcome is not surfaced to `run`'s caller yet: a timeout is
+            // already reported as `ShellError.timeout`, and widening that error
+            // to carry the stop outcome is a public API change that belongs with
+            // the consumer that needs it, not with this fix.
+            _ = await stopProcessAsync(proc, grace: Self.sigtermGracePeriod)
         }
 
         // The continuation yields the exit status when the kernel reported it
@@ -387,7 +397,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
                     }
                     return
                 }
-                #if canImport(Glibc)
+                #if canImport(Glibc) || canImport(Musl)
                 Task.detached {
                     while !guard_.isResumed {
                         if let status = proc.kernelReportedExitStatus {

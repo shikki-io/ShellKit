@@ -1,0 +1,82 @@
+# .woodpecker/musl-cross.yml — prove this package builds for Linux WITHOUT a Linux runner
+#
+# Spec c8fa126c W5, BR-L-01. f1a7c3e8's BR-CKL-05 asked for a Linux CI runner; it
+# does not need one. The Swift Static Linux SDK cross-compiles from macOS, so this
+# gate runs on the same Mac agent as `macos-gate.yml` and covers the two triples
+# that SDK actually declares — read from the bundle's own `swift-sdk.json`
+# (schemaVersion 4.0): `aarch64-swift-linux-musl` and `x86_64-swift-linux-musl`.
+# "Linux" in this gate means those two and nothing else.
+#
+# WHY IT IS NOT REDUNDANT WITH linux-build.yml. That one builds natively on
+# `swift:6.3-jammy`, which is glibc and dynamic. This one is static musl, which is
+# what `shi ship --platform linux` produces (decision 7701c618: static musl first,
+# native glibc as the fallback). A package can pass one and fail the other: musl
+# has no `Darwin` and no `Glibc` either, so a libc-qualified call that glibc
+# tolerates by accident fails here. Measured 2026-11-15 — that is exactly how
+# ShellKit's two `Darwin.kill(...)` calls were found (shikki-io/ShellKit#21), and
+# how AIKit's four unguarded `URLSession` files were found the same hour.
+#
+# WHY IT CANNOT RUN IN A CONTAINER. The SDK and the toolchain are installed in the
+# maintainer's home directory, not in an image. So the trust model is the one
+# `macos-gate.yml` documents and the triggers are the same: never on
+# `pull_request`, because a public repository's pull request carries code from
+# outside the team and that code must never execute on the Mac.
+
+when:
+  - event: [push, manual]
+    branch:
+      - "release/*"
+      - "beta/*"
+      # Same reasoning as macos-gate.yml: develop and main belong here and are
+      # commented out only while one maintainer runs the whole flow by hand.
+      # - develop
+      # - main
+
+labels:
+  platform: darwin/arm64
+
+steps:
+  # A gate that cannot find its toolchain FAILS; it never skips. Xcode's own Swift
+  # reports the SAME version string as swift.org's 6.4.2 but produces
+  #   error: compiled module was created by a different version of the compiler ''
+  # against the SDK's `Swift.swiftmodule`, so the toolchain is selected explicitly.
+  # Its bundle id is DISCOVERED rather than hardcoded: a pinned id rots at the next
+  # toolchain install, and a rotted id would silently fall back to Xcode's Swift and
+  # fail with a message about module versions instead of about the gate.
+  musl-cross-build:
+    image: bash
+    commands:
+      - |
+        set -eu
+        test -f Package.swift
+
+        SDK_LIST=$$(swift sdk list)
+        echo "installed Swift SDKs:"
+        echo "$$SDK_LIST"
+        if ! echo "$$SDK_LIST" | grep -q 'static-linux'; then
+          echo "musl-cross: no Static Linux SDK installed on this agent." >&2
+          echo "  install it with: swift sdk install <...static-linux...artifactbundle URL>" >&2
+          exit 1
+        fi
+
+        TOOLCHAIN=""
+        for plist in "$$HOME"/Library/Developer/Toolchains/*.xctoolchain/Info.plist; do
+          if [ ! -f "$$plist" ]; then continue; fi
+          id=$$(plutil -extract CFBundleIdentifier raw "$$plist" 2>/dev/null || true)
+          case "$$id" in
+            org.swift.*) TOOLCHAIN="$$id"; break ;;
+          esac
+        done
+        if [ -z "$$TOOLCHAIN" ]; then
+          echo "musl-cross: no swift.org toolchain in ~/Library/Developer/Toolchains." >&2
+          echo "  Xcode's Swift cannot read the Static Linux SDK's Swift.swiftmodule." >&2
+          exit 1
+        fi
+        echo "toolchain: $$TOOLCHAIN"
+        export TOOLCHAINS="$$TOOLCHAIN"
+        swift --version
+
+        for triple in aarch64-swift-linux-musl x86_64-swift-linux-musl; do
+          echo "=== $$triple ==="
+          swift build --swift-sdk "$$triple"
+        done

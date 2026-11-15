@@ -52,3 +52,24 @@ test_file_patterns = ["**/ShellKitTests/RunStreamingTests.swift"]
 expected_test_min = 8
 timeout_seconds = 600
 description = "ShellKit — TimedShellExecutor.runStreaming: live chunks, independent stderr, timeout kill, protocol fallback. Run: kagami test --scope ShellKitStreaming --strict"
+
+[[scopes]]
+# Spec c8fa126c W5. The portability ratchet plus the Linux hang regressions.
+# Registered rather than left to auto-discovery because its value is that it runs
+# on EVERY delivered head: the two defects it pins — an Apple-capability
+# condition outside Platform/, and a POSIX gate that omits musl — are invisible
+# to both a macOS test run and a musl cross build.
+#
+# No `test_command` here on purpose. An explicit one made kagami refuse to count
+# ("Fix: add or update count_pattern"): it can only tally output from a command
+# it composed itself. The sibling scopes all let it derive the filter from
+# `type_patterns`, so this one does too.
+description = "ShellKit — portability ratchet (Apple-capability conditions, musl gates, libc qualifiers in Sources and Tests) plus the Linux hang regressions. Run: kagami test --scope ShellKitPortability"
+expected_test_min = 16
+language = "swift"
+name = "ShellKitPortability"
+package_path = "."
+test_file_patterns = ["**/ShellKitTests/Portability/ShellKitPortabilityRatchetTests.swift", "**/ShellKitTests/Portability/LinuxHangRegressionTests.swift", "**/ShellKitTests/Portability/ProcessStopOutcomeTests.swift"]
+test_target_name = "ShellKitTests"
+timeout_seconds = 300
+type_patterns = ["ShellKitPortabilityRatchetTests", "LinuxHangRegressionTests", "ProcessStopOutcomeTests"]

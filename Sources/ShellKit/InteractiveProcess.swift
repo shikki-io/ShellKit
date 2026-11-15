@@ -3,6 +3,8 @@ import Foundation
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #elseif canImport(WinSDK)
 import WinSDK
 #endif
@@ -174,6 +176,22 @@ public final class InteractiveProcess: @unchecked Sendable {
     /// Everything the child wrote to stderr so far (bounded), trimmed.
     public var stderrText: String { stderrSink.text() }
 
+    /// The descriptors this process owns, for asserting their flags.
+    ///
+    /// Internal rather than public: no consumer needs it, and it is named for
+    /// what it returns rather than for the test that reads it — a
+    /// `…ForTesting` accessor would make the test the API's reason to exist.
+    /// `LinuxHangRegressionTests` reads it to check `FD_CLOEXEC` on the LIVE
+    /// descriptors, which is the only way to prove the product sets the flag
+    /// rather than that a helper could set it.
+    var pipeDescriptors: [(name: String, fd: Int32)] {
+        [
+            ("stdin write", stdinWriter.fileDescriptor),
+            ("stdout read", stdoutReader.fileDescriptor),
+            ("stderr read", stderrReader.fileDescriptor),
+        ]
+    }
+
     /// Spawn `executablePath` with pipes on all three streams.
     ///
     /// - Parameters:
@@ -191,7 +209,7 @@ public final class InteractiveProcess: @unchecked Sendable {
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        #if canImport(Darwin) || canImport(Glibc)
+        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
         // Same rule as TimedShellExecutor (W1.2): no pipe end leaks into the
         // next child we spawn, or a reader can wait on a stranger's copy.
         //
@@ -272,7 +290,7 @@ public final class InteractiveProcess: @unchecked Sendable {
     /// that holds stdout open and never answers cannot wedge the caller.
     /// - Returns: the line, or nil on EOF or deadline.
     public func readLine(deadline: Date) -> Data? {
-        #if canImport(Darwin) || canImport(Glibc)
+        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
         return readLinePOSIX(deadline: deadline)
         #elseif os(Windows)
         return readLineWindows(deadline: deadline)
@@ -281,7 +299,7 @@ public final class InteractiveProcess: @unchecked Sendable {
         #endif
     }
 
-    #if canImport(Darwin) || canImport(Glibc)
+    #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
     /// `poll` for readability, then one byte: a line reader must not consume
     /// the byte after the newline, so it cannot read in blocks.
     private func readLinePOSIX(deadline: Date) -> Data? {
@@ -343,29 +361,31 @@ public final class InteractiveProcess: @unchecked Sendable {
 
     /// Close stdin, ask the child to stop, wait ``terminationGrace``, kill it
     /// if still alive, and reap. Idempotent; safe on every exit path.
-    public func terminate() {
+    /// - Returns: what actually happened to the child — `.alreadyExited`,
+    ///   `.graceful` or `.hardTerminated`. Discardable, so existing callers keep
+    ///   compiling (operator decision D4, 2026-11-15).
+    @discardableResult
+    public func terminate() -> ProcessStopOutcome {
         lock.lock()
-        if tornDown { lock.unlock(); return }
+        if tornDown { lock.unlock(); return .alreadyExited }
         tornDown = true
         lock.unlock()
 
         stderrPump.stop(waiting: true)  // no read can race the close() below
         try? stdinWriter.close()
+        var outcome = ProcessStopOutcome.alreadyExited
         if launched {
-            if !process.hasExited {
-                process.terminate()                                   // SIGTERM (POSIX)
-                let grace = Date().addingTimeInterval(Self.terminationGrace)
-                while !process.hasExited, Date() < grace {
-                    Thread.sleep(forTimeInterval: 0.02)
-                }
-                if !process.hasExited {
-                    process.forceKill()                               // escalate
-                }
-            }
+            // One shared implementation for all three subprocess shapes
+            // (operator decision D4): graceful request, grace period, escalate,
+            // and report which of those actually happened. Hand-rolling the
+            // ladder here is how this very method came to wrap its escalation in
+            // `#if canImport(Darwin)` while TimedShellExecutor's did not.
+            outcome = stopProcess(process, grace: Self.terminationGrace, poll: 0.02)
             _ = process.waitForExit()                                 // reap, always
         }
         try? stdoutReader.close()
         try? stderrReader.close()
+        return outcome
     }
 
     private var isTornDown: Bool {
