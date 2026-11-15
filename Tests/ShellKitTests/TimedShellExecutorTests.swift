@@ -2,6 +2,8 @@ import XCTest
 @testable import ShellKit
 #if canImport(Darwin)
     import Darwin
+#elseif canImport(Glibc)
+    import Glibc
 #endif
 
 // MARK: - TimedShellExecutorTests
@@ -139,17 +141,63 @@ final class TimedShellExecutorTests: XCTestCase {
         }
 
         // kill(pid, 0) returns 0 if the process exists, -1 with errno=ESRCH if not.
-        let rc = Darwin.kill(pid, 0)
-        if rc == 0 {
-            // Process still exists — could be a zombie (reaping in progress).
-            // Give it another moment.
+        // A zombie still answers 0 — give reaping another moment.
+        if !Self.isGone(pid) {
             try await Task.sleep(nanoseconds: 500_000_000)
-            let rc2 = Darwin.kill(pid, 0)
-            if rc2 == 0 {
+            if !Self.isGone(pid) {
                 XCTFail("Process \(pid) still alive after SIGKILL + 700ms")
             }
         }
-        // rc == -1 → ESRCH → process is gone.
+    }
+
+    // MARK: - 4b. The timeout kills a child that ignores SIGTERM, and it is reaped
+
+    /// `trap '' TERM` survives `exec`, so the `sleep` below IS the child
+    /// (no wrapper shell to outlive it) and only the SIGKILL escalation can end
+    /// it. Same shape on every platform: the pid must be gone — reaped, not a
+    /// zombie — shortly after the timeout error.
+    func testTimeoutEscalatesToSigkillForAChildThatIgnoresSigterm() async throws {
+        let executor = TimedShellExecutor(maxConcurrent: 4)
+        let pidFile = NSTemporaryDirectory() + "TimedShellExecutorTests-pid-\(UUID().uuidString).txt"
+        defer { try? FileManager.default.removeItem(atPath: pidFile) }
+
+        let start = Date()
+        do {
+            _ = try await executor.run(
+                ["sh", "-c", "trap '' TERM; echo $$ > \(pidFile); exec sleep 30"],
+                cwd: nil, env: nil, timeout: 1, stdin: nil
+            )
+            XCTFail("Expected ShellError.timeout")
+        } catch ShellError.timeout {
+            // SIGTERM is ignored, so the error only arrives after the 1s grace + SIGKILL.
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertLessThan(elapsed, 10, "the timeout must not wait for the child's 30s")
+            XCTAssertGreaterThanOrEqual(elapsed, 1.9, "SIGTERM is ignored, so 1s timeout + 1s grace must pass before SIGKILL")
+        }
+
+        guard let pidText = try? String(contentsOfFile: pidFile, encoding: .utf8),
+              let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return XCTFail("the child never wrote its pid — it did not run") }
+        // Reaping trails the exit by a moment; wait for the strict condition.
+        for _ in 0..<100 where kill(pid, 0) == 0 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(kill(pid, 0), -1, "pid \(pid) must be reaped, not left a zombie")
+        XCTAssertEqual(errno, ESRCH)
+    }
+
+    /// True once `pid` no longer runs. Where Foundation reaps lazily (Linux) a
+    /// zombie counts as gone — it executes nothing — but only the strict
+    /// `kill(pid, 0) == ESRCH` check above proves the reap.
+    private static func isGone(_ pid: Int32) -> Bool {
+        if kill(pid, 0) != 0 { return errno == ESRCH }
+        #if os(Linux)
+        if let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+           let close = stat.lastIndex(of: ")") {
+            return stat[stat.index(close, offsetBy: 2)...].first == "Z"
+        }
+        #endif
+        return false
     }
 
     // MARK: - 5. Non-zero exit code is returned correctly (not thrown)
@@ -334,5 +382,31 @@ final class TimedShellExecutorTests: XCTestCase {
             "post-exit drain must be bounded by the grace period, "
                 + "not the grandchild's lifetime (took \(elapsed)s)"
         )
+    }
+
+    // MARK: - Portability: output size and orphaned descendants
+
+    /// 1 MiB — many pipe buffers — must arrive byte for byte. A drain that
+    /// reads once per dispatch callback silently loses the tail on Linux.
+    func testOneMebibyteOfStdoutIsCapturedExactly() async throws {
+        let executor = TimedShellExecutor(maxConcurrent: 4)
+        for _ in 0..<5 {
+            let result = try await executor.run(
+                ["head", "-c", "1048576", "/dev/zero"], cwd: nil, env: nil, timeout: 10, stdin: nil)
+            XCTAssertEqual(result.exitCode, 0)
+            XCTAssertEqual(result.stdout.count, 1_048_576)
+        }
+    }
+
+    /// The child exits with 7 while a descendant it started keeps running
+    /// (output redirected, so pipe EOF is not what ends the wait). The result
+    /// must carry 7 promptly, not when the 30s descendant dies.
+    func testExitCodeIsReportedWhileADescendantOutlivesTheChild() async throws {
+        let executor = TimedShellExecutor()
+        let start = Date()
+        let result = try await executor.run(
+            ["sh", "-c", "sleep 30 >/dev/null 2>&1 & exit 7"], cwd: nil, env: nil, timeout: 10, stdin: nil)
+        XCTAssertEqual(result.exitCode, 7)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "waited for the descendant instead of the child")
     }
 }

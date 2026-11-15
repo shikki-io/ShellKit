@@ -1,6 +1,10 @@
 import Foundation
 #if canImport(Darwin)
     import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#elseif canImport(WinSDK)
+    import WinSDK
 #endif
 
 // MARK: - TimedShellExecutor
@@ -62,6 +66,12 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
     /// acquisition, the detached signal and the cancellation handler in both
     /// methods, which is two copies of the concurrency contract that would
     /// have had to be kept in step by hand.
+    ///
+    /// To receive live output as chunks arrive, call ``runStreaming`` directly
+    /// (via the `ShellExecutorProtocol` reference), or use the convenience
+    /// overload ``run(_:cwd:env:timeout:stdin:onStdout:onStderr:)`` on this
+    /// concrete type. The full output is still returned in `ShellCommandResult`
+    /// so the caller can stream live AND inspect the buffer after exit.
     public func run(
         _ args: [String],
         cwd: String? = nil,
@@ -72,6 +82,38 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         try await runStreaming(
             args, cwd: cwd, env: env, timeout: timeout, stdin: stdin,
             onStdout: nil, onStderr: nil
+        )
+    }
+
+    /// Execute a command, forwarding live output as chunks arrive and
+    /// returning the full output at exit.
+    ///
+    /// Convenience overload of ``run(_:cwd:env:timeout:stdin:)`` on the
+    /// concrete type. Delegates to ``runStreaming`` — all timeout,
+    /// SIGTERM/SIGKILL escalation, concurrency-cap and pipe-deadlock
+    /// guarantees apply unchanged.
+    ///
+    /// - Note: `onStdout`/`onStderr` have no defaults here: they must be
+    ///   passed explicitly so Swift resolves this overload unambiguously from
+    ///   the five-parameter version. Pass `nil` for a channel you don't need.
+    ///
+    ///   This overload exists only on `TimedShellExecutor`, not on
+    ///   `ShellExecutorProtocol`. Callers holding a protocol reference call
+    ///   ``runStreaming`` directly; calling ``run`` through the protocol always
+    ///   buffers (sinks are nil). This is correct for test doubles, which have
+    ///   no live output to emit.
+    public func run(
+        _ args: [String],
+        cwd: String? = nil,
+        env: [String: String]? = nil,
+        timeout: TimeInterval = 10,
+        stdin: Data? = nil,
+        onStdout: (@Sendable (Data) -> Void)?,
+        onStderr: (@Sendable (Data) -> Void)?
+    ) async throws -> ShellCommandResult {
+        try await runStreaming(
+            args, cwd: cwd, env: env, timeout: timeout, stdin: stdin,
+            onStdout: onStdout, onStderr: onStderr
         )
     }
 
@@ -155,12 +197,59 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         public let arguments: [String]
     }
 
-    /// Pure and tested: absolute `args[0]` → direct exec; otherwise `/usr/bin/env`.
+    /// Pure and tested: absolute `args[0]` → direct exec; otherwise, on POSIX,
+    /// `/usr/bin/env`.
+    ///
+    /// Windows has no `env` to delegate the lookup to, so the lookup happens
+    /// here, through ``ExecutableResolver`` (which also tries the `PATHEXT`
+    /// suffixes, so `git` reaches `git.exe`). An unresolvable name is passed
+    /// through unchanged rather than guessed at: `Process.run()` then fails
+    /// with the launch error the caller needs to read, and this function stays
+    /// what its callers rely on — pure, and never a thrower.
     public static func launchPlan(for args: [String]) -> LaunchPlan {
-        guard let first = args.first, first.hasPrefix("/") else {
+        guard let first = args.first, PlatformPaths.isAbsolute(first) else {
+            #if os(Windows)
+            // STATUS: compiles by inspection, unproven on Windows (backlog afb8cd83)
+            guard let first = args.first, !first.isEmpty else {
+                return LaunchPlan(executable: "", arguments: args)
+            }
+            let executable = ExecutableResolver.resolve(first) ?? first
+            return LaunchPlan(executable: executable, arguments: Array(args.dropFirst()))
+            #else
             return LaunchPlan(executable: "/usr/bin/env", arguments: args)
+            #endif
         }
         return LaunchPlan(executable: first, arguments: Array(args.dropFirst()))
+    }
+
+    /// The child, configured but not launched: the launch plan, the working
+    /// directory and the environment. Extracted from ``spawnAndWait`` so that
+    /// function's branch count stays inside the project's lint budget — the
+    /// Windows arm of ``launchPlan(for:)`` pushed it one over.
+    private static func makeProcess(
+        args: [String],
+        cwd: String?,
+        env: [String: String]?
+    ) -> Process {
+        let proc = Process()
+        let plan = launchPlan(for: args)
+        proc.executableURL = URL(fileURLWithPath: plan.executable)
+        proc.arguments = plan.arguments
+
+        if let cwd {
+            proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        }
+
+        // A non-nil `environment` REPLACES the parent's, so extras are merged
+        // over a copy of it rather than assigned on their own.
+        if let extraEnv = env, !extraEnv.isEmpty {
+            var merged = ProcessInfo.processInfo.environment
+            for (key, value) in extraEnv {
+                merged[key] = value
+            }
+            proc.environment = merged
+        }
+        return proc
     }
 
     private static func spawnAndWait(
@@ -174,23 +263,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
     ) async throws -> ShellCommandResult {
         let start = Date()
 
-        // Build the process.
-        let proc = Process()
-        let plan = launchPlan(for: args)
-        proc.executableURL = URL(fileURLWithPath: plan.executable)
-        proc.arguments = plan.arguments
-
-        if let cwd = cwd {
-            proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        }
-
-        if let extraEnv = env, !extraEnv.isEmpty {
-            var merged = ProcessInfo.processInfo.environment
-            for (k, v) in extraEnv {
-                merged[k] = v
-            }
-            proc.environment = merged
-        }
+        let proc = makeProcess(args: args, cwd: cwd, env: env)
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -201,11 +274,11 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         // for all N..N+78 children to close their inherited copy of the write-end.
         // macOS Pipe() does NOT set O_CLOEXEC by default; this is the root cause
         // that defeated PRs #585 → #596 → #657 → #714 → #719.
-        #if canImport(Darwin)
-            fcntl(stdoutPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            fcntl(stderrPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            fcntl(stdoutPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
-            fcntl(stderrPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
+        #if canImport(Darwin) || canImport(Glibc)
+            _ = fcntl(stdoutPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
+            _ = fcntl(stderrPipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
+            _ = fcntl(stdoutPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
+            _ = fcntl(stderrPipe.fileHandleForReading.fileDescriptor, F_SETFD, FD_CLOEXEC)
         #endif
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
@@ -233,6 +306,12 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         final class ResumeGuard: @unchecked Sendable {
             private let lock = NSLock()
             private var resumed = false
+            var isResumed: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return resumed
+            }
+
             func tryResume(_ body: () -> Void) {
                 lock.lock()
                 defer { lock.unlock() }
@@ -283,15 +362,20 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
                 proc.terminate() // SIGTERM
                 try? await Task.sleep(nanoseconds: UInt64(Self.sigtermGracePeriod * 1_000_000_000))
                 if proc.isRunning {
-                    Darwin.kill(proc.processIdentifier, SIGKILL)
+                    proc.forceKill()
                 }
             }
         }
 
+        // The continuation yields the exit status when the kernel reported it
+        // before Foundation did (Linux, descendant holding Foundation's exit
+        // descriptor — see Process.kernelReportedExitStatus), nil when
+        // Foundation's own terminationHandler fired (always, on Darwin).
+        let kernelStatus: Int32?
         do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            kernelStatus = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int32?, Error>) in
                 proc.terminationHandler = { _ in
-                    guard_.tryResume { continuation.resume() }
+                    guard_.tryResume { continuation.resume(returning: nil) }
                 }
                 do {
                     try proc.run()
@@ -301,7 +385,19 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
                             args: args, underlying: error.localizedDescription
                         ))
                     }
+                    return
                 }
+                #if canImport(Glibc)
+                Task.detached {
+                    while !guard_.isResumed {
+                        if let status = proc.kernelReportedExitStatus {
+                            guard_.tryResume { continuation.resume(returning: status) }
+                            return
+                        }
+                        try? await Task.sleep(nanoseconds: 20_000_000)
+                    }
+                }
+                #endif
             }
         } catch {
             timeoutTask.cancel()
@@ -309,7 +405,7 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
         }
         timeoutTask.cancel()
 
-        let exitCode = proc.terminationStatus
+        let exitCode = kernelStatus ?? proc.terminationStatus
         // W1.4: bound the post-exit drain. The child has exited; give the
         // pipes a short window to flush buffered output, then force-finish
         // with whatever arrived. Without this, `await` here was UNBOUNDED
@@ -338,18 +434,18 @@ public actor TimedShellExecutor: ShellExecutorProtocol {
 
 /// Handler-based pipe accumulator with a force-finish escape hatch.
 ///
-/// `readabilityHandler` delivers chunks on a dispatch source — no thread is
-/// ever parked in `read(2)`, so the drain can always be terminated even when
-/// pipe EOF never arrives (a daemonized grandchild holding the write-end).
+/// The ``PipePump`` delivers chunks without ever parking a thread in a blocking
+/// `read(2)`, so the drain can always be terminated even when pipe EOF never
+/// arrives (a daemonized grandchild holding the write-end).
 /// EOF (empty `availableData`) finishes naturally; `forceFinish()` finishes
 /// with whatever accumulated.
 private final class PipeDrain: @unchecked Sendable {
     private let lock = NSLock()
-    private let handle: FileHandle
     private var buffer = Data()
     private var finished = false
     private var continuation: CheckedContinuation<Data, Never>?
-    /// Live sink, called on the dispatch source as each chunk lands.
+    private var pump: PipePump?
+    /// Live sink, called on the pump as each chunk lands.
     ///
     /// The drain ALREADY received chunks incrementally — it simply had no way
     /// to hand them on, so every caller that needed live output (a 30s
@@ -359,22 +455,26 @@ private final class PipeDrain: @unchecked Sendable {
     private let onChunk: (@Sendable (Data) -> Void)?
 
     init(handle: FileHandle, onChunk: (@Sendable (Data) -> Void)? = nil) {
-        self.handle = handle
         self.onChunk = onChunk
-        handle.readabilityHandler = { [weak self] h in
-            guard let self else { return }
-            let chunk = h.availableData
-            if chunk.isEmpty {
-                self.finish() // EOF — all write-ends closed.
-            } else {
+        let pump = PipePump(
+            handle: handle,
+            onChunk: { [weak self] chunk in
+                guard let self else { return }
                 self.lock.lock()
                 self.buffer.append(chunk)
                 self.lock.unlock()
                 // Outside the lock: a slow consumer must not stall the drain,
                 // which is what re-introduces the pipe-deadlock class (H6).
                 self.onChunk?(chunk)
+            },
+            onEnd: { [weak self] in
+                self?.finish() // EOF — all write-ends closed.
             }
-        }
+        )
+        lock.lock()
+        self.pump = pump
+        lock.unlock()
+        pump.start()
     }
 
     /// Finish with the accumulated data regardless of EOF (post-exit grace).
@@ -392,8 +492,10 @@ private final class PipeDrain: @unchecked Sendable {
         let cont = continuation
         continuation = nil
         let data = buffer
+        let pump = self.pump
+        self.pump = nil
         lock.unlock()
-        handle.readabilityHandler = nil
+        pump?.stop(waiting: false)
         cont?.resume(returning: data)
     }
 
